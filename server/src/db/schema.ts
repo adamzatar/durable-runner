@@ -38,16 +38,23 @@ export const steps = pgTable(
     // share one mechanism instead of two.
     availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
     // Nullable: a step that no worker owns has no owner recorded. Plain
-    // text, not a foreign key — there is no workers table yet, and
-    // inventing one now would be speculative.
+    // text, deliberately not a foreign key to `workers`: authority over a
+    // step comes from this row's lease (owner + lease_version + deadline),
+    // not from the worker being registered. The workers table is liveness
+    // evidence for observability and must not become a precondition of,
+    // or an input to, ownership decisions.
     currentWorkerId: text("current_worker_id"),
     // Ownership generation. 0 means "never claimed"; every successful
     // READY -> RUNNING claim increments it. See claim-step.ts.
     leaseVersion: integer("lease_version").notNull().default(0),
-    // Written by the claim's ownership UPDATE from the database clock at
-    // that moment (see claim-step.ts). NOTHING READS THIS YET: no sweeper,
-    // no expiry check, no reclaim. An expired value currently has no
-    // effect on eligibility or on the owning worker.
+    // The authority boundary for the current ownership generation, always
+    // written from the database clock: set by the claim, pushed forward by
+    // renewStepLease, cleared by completion and by recovery. Once the
+    // database clock reaches it, the owner can no longer renew or complete
+    // (renew-step-lease.ts, complete-step.ts) and recovery may return the
+    // step to READY (recover-expired-steps.ts). Those are three separate
+    // statements checking the same boundary; no background process has to
+    // run for the owner to lose authority.
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
     // What a worker should execute. No default, same reasoning as status:
     // a caller must state what a step does, rather than silently getting a
@@ -77,6 +84,18 @@ export const steps = pgTable(
     index("steps_claimable_idx")
       .on(sql`priority DESC`, sql`available_at ASC`, sql`id ASC`)
       .where(sql`status = 'READY'`),
+    // Serves the recovery sweep (recover-expired-steps.ts), which runs on a
+    // fixed interval whether or not anything has expired. Partial on
+    // RUNNING for the same reason as above: terminal rows accumulate
+    // forever. Only actively executing steps are bounded by worker loops;
+    // failed/abandoned executions remain RUNNING until recovery and can
+    // temporarily exceed worker count. The sweep compares against
+    // clock_timestamp(), which is volatile, so this index is not used as a
+    // range bound on the deadline — it can avoid scanning terminal rows
+    // when the planner chooses it. Nothing has been measured.
+    index("steps_running_lease_idx")
+      .on(sql`lease_expires_at ASC`)
+      .where(sql`status = 'RUNNING'`),
     // A RUNNING row must have a non-null current_worker_id, a non-null
     // lease_expires_at, and lease_version > 0. The database enforces those
     // three conditions whichever code path writes the row. It does not
@@ -91,3 +110,25 @@ export const steps = pgTable(
     ),
   ],
 );
+
+// Worker liveness evidence (Milestone 5). One row per worker ID, not per
+// process lifetime: a process that restarts under the same ID overwrites
+// started_at. A row here means only "a process using this ID reached
+// PostgreSQL at last_heartbeat_at". It does not mean the worker is alive
+// now, that it owns anything, or that its work is healthy, and nothing in
+// the recovery path reads it — lease expiry on `steps` is the only thing
+// that authorizes taking work away from a worker. See
+// docs/architecture.md.
+//
+// Deliberately absent: a status column (liveness is inferred from
+// heartbeat age by whoever reads it, not stored as a verdict), a stopped_at
+// column (nothing reads it yet), PID/host (not a meaningful identity once
+// processes restart or run elsewhere), capacity, labels.
+export const workers = pgTable("workers", {
+  id: text("id").primaryKey(),
+  // No defaults on either timestamp: both are written explicitly from the
+  // database's clock_timestamp() by worker-heartbeat.ts, never from the
+  // worker process's clock.
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull(),
+});

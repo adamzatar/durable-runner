@@ -130,6 +130,33 @@ describe("completeStepSuccess", () => {
     expect(row.result).toBeNull();
   });
 
+  it("rejects completion by the rightful owner and generation once the lease has expired, before any recovery runs", async () => {
+    const id = await insertReadyStep();
+    const claim = await claimNextStep(db, "worker-complete-late");
+    expect(claim.claimed).toBe(true);
+    if (!claim.claimed) throw new Error("unreachable");
+    // Same owner, same lease_version, nothing swept — only the deadline
+    // has passed.
+    await admin.query("update steps set lease_expires_at = clock_timestamp() - interval '1 millisecond' where id = $1", [
+      id,
+    ]);
+
+    await expect(
+      completeStepSuccess(db, {
+        id,
+        workerId: claim.step.workerId,
+        leaseVersion: claim.step.leaseVersion,
+        result: { hash: "should-not-be-written" },
+      }),
+    ).rejects.toThrow(CompletionConsistencyError);
+
+    const row = await readStep(id);
+    expect(row.status).toBe("RUNNING");
+    expect(row.current_worker_id).toBe(claim.step.workerId);
+    expect(row.lease_version).toBe(claim.step.leaseVersion);
+    expect(row.result).toBeNull();
+  });
+
   it("rejects completion of a step that is not RUNNING", async () => {
     const id = await insertReadyStep();
 

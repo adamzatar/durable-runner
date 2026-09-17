@@ -2,14 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runWorkerLoop } from "../src/worker/worker-loop.js";
+import { CompletionConsistencyError } from "../src/db/complete-step.js";
+import { recoverExpiredSteps } from "../src/db/recover-expired-steps.js";
+import { runWorkerLoop, type WorkerLoopOptions } from "../src/worker/worker-loop.js";
 
 // Exercises the real worker loop against real PostgreSQL rows. The workers
 // here are logical: separate single-connection pools/async loops inside
 // this one Vitest process, not separate OS processes (same convention as
 // claim-step.test.ts's concurrent claiming tests). A real multi-process
 // run is exercised by `npm run demo:workers`
-// (server/src/worker/run-demo.ts) and by manually running
+// (server/src/worker/run-demo.ts), `npm run demo:recovery`
+// (server/src/worker/run-recovery-demo.ts), and by manually running
 // `npm run worker <id>` more than once - not by this automated suite,
 // which needs to stay fast and deterministic.
 const connectionString = process.env.DATABASE_URL;
@@ -24,19 +27,27 @@ interface LogicalWorker {
   db: NodePgDatabase<Record<string, never>>;
   controller: AbortController;
   loopPromise: Promise<void>;
+  logs: string[];
+  errors: Array<{ message: string; error: unknown }>;
 }
 
-function startLogicalWorker(workerId: string): LogicalWorker {
+function startLogicalWorker(
+  workerId: string,
+  options: Pick<WorkerLoopOptions, "leaseDurationMs" | "leaseRenewalIntervalMs"> = {},
+): LogicalWorker {
   const pool = new Pool({ connectionString, max: 1 });
   const db = drizzle(pool);
   const controller = new AbortController();
+  const logs: string[] = [];
+  const errors: Array<{ message: string; error: unknown }> = [];
   const loopPromise = runWorkerLoop(db, workerId, {
+    ...options,
     signal: controller.signal,
     pollIntervalMs: 50,
-    log: () => undefined,
-    logError: () => undefined,
+    log: (message) => logs.push(message),
+    logError: (message, error) => errors.push({ message, error }),
   });
-  return { pool, db, controller, loopPromise };
+  return { pool, db, controller, loopPromise, logs, errors };
 }
 
 async function stopLogicalWorker(worker: LogicalWorker): Promise<void> {
@@ -79,6 +90,40 @@ async function waitUntil(check: () => Promise<boolean>, timeoutMs: number): Prom
   }
 }
 
+async function sqlBool(query: string, params: unknown[]): Promise<boolean> {
+  const result = await admin.query<{ ok: boolean }>(query, params);
+  return result.rows[0]!.ok;
+}
+
+async function leaseState(id: string): Promise<{
+  status: string;
+  lease_version: number;
+  lease_expires_at: string | null;
+  expired: boolean | null;
+}> {
+  const result = await admin.query(
+    `select status, lease_version, lease_expires_at::text, lease_expires_at <= clock_timestamp() as expired
+     from steps where id = $1`,
+    [id],
+  );
+  return result.rows[0];
+}
+
+function hashOf(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+// Synchronously occupies this process's event loop. Stands in for an
+// executor doing CPU-bound work, a long GC pause, or the process being
+// stopped by the OS: no timer — including the lease-renewal timer — can
+// fire until it returns.
+function blockEventLoop(ms: number): void {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    // busy wait
+  }
+}
+
 beforeEach(async () => {
   admin = new Pool({ connectionString, max: 4 });
   await admin.query("delete from steps");
@@ -100,9 +145,7 @@ describe("runWorkerLoop", () => {
       }, 5_000);
 
       const [row] = await readSteps([id]);
-      expect(row!.result).toEqual({
-        hash: createHash("sha256").update("worker-loop-single").digest("hex"),
-      });
+      expect(row!.result).toEqual({ hash: hashOf("worker-loop-single") });
       expect(row!.current_worker_id).toBeNull();
     } finally {
       await stopLogicalWorker(worker);
@@ -136,6 +179,138 @@ describe("runWorkerLoop", () => {
       await Promise.all(workers.map(stopLogicalWorker));
     }
   }, 15_000);
+
+  it("renews the lease while executing a step that outlasts it, and completes at the same lease_version", async () => {
+    // Lease 600ms, renewal every 100ms, step takes 2000ms: without
+    // renewal the lease would expire a third of the way through and
+    // completion (which requires an unexpired lease) would be rejected.
+    // No recovery sweep runs in this test.
+    const id = await insertReadyStep("worker-loop-renewal", 2_000);
+    const worker = startLogicalWorker("loop-worker-renewal", { leaseDurationMs: 600, leaseRenewalIntervalMs: 100 });
+
+    try {
+      await waitUntil(async () => (await leaseState(id)).status === "RUNNING", 5_000);
+      const claimed = await leaseState(id);
+
+      // Wait until the database clock is past the first deadline observed
+      // (the claim's, or an early renewal's). The step must still be
+      // RUNNING at the same version, with a later, still-live deadline —
+      // only a renewal after that observation can explain that.
+      await waitUntil(() => sqlBool("select clock_timestamp() > $1::timestamptz as ok", [claimed.lease_expires_at]), 5_000);
+      const renewed = await leaseState(id);
+      expect(renewed.status).toBe("RUNNING");
+      expect(renewed.lease_version).toBe(1);
+      expect(renewed.expired).toBe(false);
+      expect(
+        await sqlBool("select $1::timestamptz > $2::timestamptz as ok", [renewed.lease_expires_at, claimed.lease_expires_at]),
+      ).toBe(true);
+
+      await waitUntil(async () => (await leaseState(id)).status === "SUCCEEDED", 5_000);
+      const [row] = await readSteps([id]);
+      expect(row!.result).toEqual({ hash: hashOf("worker-loop-renewal") });
+      expect((await leaseState(id)).lease_version).toBe(1);
+      expect(worker.errors).toEqual([]);
+    } finally {
+      await stopLogicalWorker(worker);
+    }
+  }, 15_000);
+
+  it("keeps renewing through a shutdown requested mid-step, so the step still completes", async () => {
+    const id = await insertReadyStep("worker-loop-shutdown-mid-step", 1_500);
+    const worker = startLogicalWorker("loop-worker-graceful", { leaseDurationMs: 500, leaseRenewalIntervalMs: 80 });
+
+    await waitUntil(async () => (await leaseState(id)).status === "RUNNING", 5_000);
+    worker.controller.abort();
+    await worker.loopPromise;
+    await worker.pool.end();
+
+    // The step ran three lease-durations past the abort and still
+    // completed: the shutdown signal stops new claims, not renewal.
+    const state = await leaseState(id);
+    expect(state.status).toBe("SUCCEEDED");
+    expect(state.lease_version).toBe(1);
+    expect(worker.errors).toEqual([]);
+  }, 15_000);
+
+  it("stops renewing when the executor throws, leaving the step RUNNING until its lease expires and recovery returns it", async () => {
+    // Invalid payload: the executor throws. No retry exists yet.
+    const id = randomUUID();
+    await admin.query(
+      `insert into steps (id, status, priority, task_type, payload)
+       values ($1, 'READY', 0, 'hash_after_delay', '{"input":"","delayMs":0}'::jsonb)`,
+      [id],
+    );
+    const worker = startLogicalWorker("loop-worker-throws", { leaseDurationMs: 400, leaseRenewalIntervalMs: 50 });
+
+    try {
+      await waitUntil(async () => worker.errors.some((entry) => entry.message.includes("execution failed")), 5_000);
+      const atFailure = await leaseState(id);
+      expect(atFailure.status).toBe("RUNNING");
+
+      // Well past expiry and many renewal intervals later, the deadline has
+      // not moved: nothing is renewing a step whose executor failed.
+      await waitUntil(async () => (await leaseState(id)).expired === true, 5_000);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const later = await leaseState(id);
+      expect(later.status).toBe("RUNNING");
+      expect(later.lease_expires_at).toBe(atFailure.lease_expires_at);
+      expect(later.lease_version).toBe(1);
+      expect(
+        worker.errors.some(
+          (entry) => entry.message.includes("completion rejected") || entry.message.includes("completion write failed"),
+        ),
+      ).toBe(false);
+    } finally {
+      // Stopped before recovery, so it does not immediately pick the step
+      // back up and fail again.
+      await stopLogicalWorker(worker);
+    }
+
+    expect(await recoverExpiredSteps(drizzle(admin))).toEqual([{ id, leaseVersion: 1 }]);
+    expect((await leaseState(id)).status).toBe("READY");
+  }, 15_000);
+
+  it("loses the lease when the event loop is blocked past the deadline: completion is rejected, and after recovery the step runs again at the next lease_version", async () => {
+    // Lease 500ms, renewal every 50ms, step takes 1800ms. Partway in, the
+    // event loop is blocked for 1200ms, so no renewal can fire; the last
+    // renewal that did land set a deadline at most ~500ms into the block.
+    const id = await insertReadyStep("worker-loop-blocked", 1_800);
+    const worker = startLogicalWorker("loop-worker-blocked", { leaseDurationMs: 500, leaseRenewalIntervalMs: 50 });
+
+    try {
+      await waitUntil(async () => (await leaseState(id)).status === "RUNNING", 5_000);
+      blockEventLoop(1_200);
+
+      // First run: renewal resumes after the block and is rejected, the
+      // executor still finishes (nothing cancels it), and completion is
+      // rejected. No sweep has run, so the row is still RUNNING under this
+      // worker at version 1 — expired, with no result.
+      await waitUntil(
+        async () => worker.errors.some((entry) => entry.error instanceof CompletionConsistencyError),
+        5_000,
+      );
+      expect(worker.logs.some((line) => line.includes("lease renewal rejected"))).toBe(true);
+      const afterFirstRun = await leaseState(id);
+      expect(afterFirstRun.status).toBe("RUNNING");
+      expect(afterFirstRun.lease_version).toBe(1);
+      expect(afterFirstRun.expired).toBe(true);
+      const [unfinished] = await readSteps([id]);
+      expect(unfinished!.result).toBeNull();
+
+      // Recovery, then the same worker loop claims it again as a new
+      // generation and this time completes. The work executed twice; its
+      // completion was recorded once.
+      expect(await recoverExpiredSteps(drizzle(admin))).toEqual([{ id, leaseVersion: 1 }]);
+      await waitUntil(async () => (await leaseState(id)).status === "SUCCEEDED", 10_000);
+      const final = await leaseState(id);
+      expect(final.lease_version).toBe(2);
+      const [row] = await readSteps([id]);
+      expect(row!.result).toEqual({ hash: hashOf("worker-loop-blocked") });
+      expect(worker.logs.filter((line) => line.includes(`claimed step ${id}`))).toHaveLength(2);
+    } finally {
+      await stopLogicalWorker(worker);
+    }
+  }, 20_000);
 
   it("stops polling and returns after the signal is aborted", async () => {
     const worker = startLogicalWorker("loop-worker-shutdown");

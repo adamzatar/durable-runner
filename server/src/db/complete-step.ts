@@ -3,12 +3,15 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { transitionStepStatus } from "../domain/step-transitions.js";
 
 // Thrown when the completion write did not affect exactly one row. Unlike
-// ClaimConsistencyError, this can mean several different things (wrong
-// worker, stale lease_version, step already terminal, step doesn't exist)
-// and the predicate can't tell them apart after the fact — it only proves
-// this worker no longer matches the ownership generation it claimed with.
-// That's enough to reject the write; diagnosing which case it was is not
-// needed to do that safely.
+// ClaimConsistencyError, this can mean several different things (lease
+// expired, step recovered, wrong worker, stale lease_version, step already
+// terminal, step doesn't exist) and the predicate can't tell them apart
+// after the fact — it only proves this worker no longer holds a live lease
+// on the ownership generation it claimed with. That's enough to reject the
+// write; diagnosing which case it was is not needed to do that safely.
+//
+// Since Milestone 5 this is an expected outcome for a worker that failed to
+// renew its lease in time, not only a sign of a bug.
 export class CompletionConsistencyError extends Error {
   constructor(message: string) {
     super(message);
@@ -24,18 +27,51 @@ export interface CompleteStepSuccessParams {
 }
 
 /**
- * Persists RUNNING -> SUCCEEDED for a step this worker still owns.
+ * Persists RUNNING -> SUCCEEDED for a step this worker still holds a live
+ * lease on.
  *
- * The ownership-generation predicate (status = 'RUNNING' AND
- * current_worker_id = $workerId AND lease_version = $leaseVersion) is one
- * atomic UPDATE, so there is no read-then-write gap for another writer to
- * land in between. If another worker had already reclaimed this step
- * (which cannot yet happen — no lease-expiry recovery exists in this
- * milestone, so no second claim of a RUNNING step is currently possible),
- * lease_version would no longer match and this write would affect zero
- * rows instead of overwriting that worker's ownership. That is fencing:
- * it stops a stale writer from recording completion, not from having
- * already performed a side effect (idempotency's job, not built yet).
+ * One atomic UPDATE whose predicate has two parts that do different jobs:
+ *
+ * - Ownership generation: status = 'RUNNING' AND current_worker_id =
+ *   $workerId AND lease_version = $leaseVersion. If the step has been
+ *   recovered and reclaimed, lease_version no longer matches and this
+ *   write affects zero rows instead of overwriting the new owner. That is
+ *   the fencing check. It stops a stale writer from recording completion,
+ *   not from having already performed a side effect (idempotency's job,
+ *   not built yet). The full stale-owner-after-reclaim scenario is not
+ *   exercised yet (Milestone 6).
+ * - Lease authority: lease_expires_at > clock_timestamp(). Once the
+ *   database clock reaches the deadline, this generation can no longer
+ *   complete, whether or not the recovery sweep has run. The deadline,
+ *   not the sweeper's schedule, is where the owner's authority ends; the
+ *   sweeper only decides how soon the step becomes claimable again. The
+ *   cost is that work finishing after its lease expired but before
+ *   recovery is discarded and runs again — accepted under at-least-once
+ *   execution. See docs/decisions/0001-lease-deadline-is-authority.md.
+ *
+ * The two parts are not redundant. After a reclaim, lease_expires_at is
+ * the NEW owner's live deadline, so the time check alone would pass for a
+ * stale owner; only the generation check rejects it. And before any
+ * recovery, the generation check alone would pass for an owner whose
+ * lease has expired; only the time check rejects it.
+ *
+ * Same transaction shape as renewStepLease, for the same reason (see the
+ * full explanation in renew-step-lease.ts):
+ *
+ *   BEGIN
+ *   1. SELECT id FROM steps WHERE id = $id FOR UPDATE   -- lock only
+ *   2. UPDATE ... SET status = 'SUCCEEDED', result, ownership cleared
+ *        WHERE id AND status AND owner AND version
+ *          AND lease_expires_at > clock_timestamp()     -- authorization
+ *   COMMIT
+ *
+ * A single UPDATE would evaluate the deadline before discovering the row
+ * is locked; if the holder only locked it and never modified it,
+ * PostgreSQL would not re-evaluate after the wait, and a completion that
+ * checked "still live" before the deadline could commit SUCCEEDED for an
+ * expired generation. Locking first means the authorizing evaluation
+ * always happens after any lock wait. clock_timestamp() rather than now(),
+ * which inside this transaction is fixed at BEGIN, before that wait.
  *
  * Clears current_worker_id and lease_expires_at on success: a terminal
  * step is not actively owned by anyone. lease_version is preserved,
@@ -53,24 +89,38 @@ export async function completeStepSuccess<TSchema extends Record<string, unknown
   // through this table instead of asserting it inline.
   transitionStepStatus("RUNNING", "SUCCEEDED");
 
-  const updated = await db.execute(sql`
-    update steps
-    set status = 'SUCCEEDED',
-        result = ${JSON.stringify(params.result)}::jsonb,
-        current_worker_id = null,
-        lease_expires_at = null,
-        updated_at = now()
-    where id = ${params.id}
-      and status = 'RUNNING'
-      and current_worker_id = ${params.workerId}
-      and lease_version = ${params.leaseVersion}
-    returning id
-  `);
+  const updatedCount = await db.transaction(async (tx) => {
+    const locked = await tx.execute(sql`
+      select id from steps where id = ${params.id} for update
+    `);
+    if (locked.rows.length === 0) {
+      return 0;
+    }
 
-  if (updated.rows.length !== 1) {
+    const updated = await tx.execute(sql`
+      update steps
+      set status = 'SUCCEEDED',
+          result = ${JSON.stringify(params.result)}::jsonb,
+          current_worker_id = null,
+          lease_expires_at = null,
+          updated_at = now()
+      where id = ${params.id}
+        and status = 'RUNNING'
+        and current_worker_id = ${params.workerId}
+        and lease_version = ${params.leaseVersion}
+        and lease_expires_at > clock_timestamp()
+      returning id
+    `);
+    // A zero-row result is returned rather than thrown here, so the
+    // transaction commits (releasing the lock, having written nothing)
+    // and the rejection is raised outside it.
+    return updated.rows.length;
+  });
+
+  if (updatedCount !== 1) {
     throw new CompletionConsistencyError(
       `completion of step ${params.id} for worker ${params.workerId} at lease_version ${params.leaseVersion} ` +
-        `updated ${updated.rows.length} rows, expected exactly 1`,
+        `updated ${updatedCount} rows, expected exactly 1`,
     );
   }
 }

@@ -13,8 +13,8 @@ import type { StepStatus } from "../src/domain/step-status.js";
 // every row before each test so results never depend on what a previous
 // run (or the Phase 0 spike) left behind in the development database.
 // Assertions still reference explicitly inserted IDs rather than global
-// counts. complete-step.test.ts and worker-loop.test.ts also write to
-// `steps` now, which is why vitest.config.ts sets `fileParallelism: false`
+// counts. Other database test files also write to `steps`, which is why
+// vitest.config.ts sets `fileParallelism: false`
 // — without it, one file's deletes/locks would interfere with another's.
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {

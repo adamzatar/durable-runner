@@ -2,9 +2,17 @@ import { createHash } from "node:crypto";
 import { parseTaskType } from "../domain/task-type.js";
 
 // Upper bound on delayMs. Exists so a bad or hostile payload can't make a
-// worker sit on one step indefinitely; the value itself is only large
-// enough to let multiple worker processes visibly overlap in a demo.
-export const MAX_TASK_DELAY_MS = 5_000;
+// worker sit on one step indefinitely. Raised from 5s to 60s in Milestone
+// 5: a step is now allowed to outlast STEP_LEASE_DURATION_MS (30s) because
+// the worker renews its lease while executing, and the recovery demo uses
+// a step longer than one lease to show that renewal happening in real
+// worker processes.
+//
+// The delay is an async timer wait, so the event loop stays free and the
+// lease-renewal timer keeps firing during it. That is a property of this
+// executor, not of executors in general: code that blocks the event loop
+// for longer than the lease stops renewal and loses the lease.
+export const MAX_TASK_DELAY_MS = 60_000;
 
 export interface HashAfterDelayPayload {
   input: string;

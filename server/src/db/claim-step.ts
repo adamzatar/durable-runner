@@ -3,25 +3,27 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { parseStepStatus } from "../domain/step-status.js";
 import { transitionStepStatus } from "../domain/step-transitions.js";
 
-// How long a claim's lease runs for. The deadline is computed from the
+// How long a lease runs for, measured from the claim's ownership write and
+// again from each successful renewal. The deadline is computed from the
 // DATABASE clock, not the claiming process's clock, so claimers with skewed
 // clocks still agree on when a lease runs out.
 //
-// Nothing enforces this deadline yet. No sweeper exists, an expired lease
-// does not make a step claimable again, and the owning worker is not told
-// when it lapses. The column records the intended deadline so that the
-// recovery mechanism, when it is built, has a value to read instead of a
-// backfill to perform.
+// Enforced since Milestone 5: once the database clock reaches the deadline
+// the owner can no longer renew or complete, and the recovery sweep may
+// return the step to READY. See worker/worker-loop.ts for how this relates
+// to the renewal interval.
 export const STEP_LEASE_DURATION_MS = 30_000;
 
 export interface ClaimedStep {
   id: string;
   status: "RUNNING";
   workerId: string;
-  // The ownership generation this claim produced. A later completion write
-  // will have to condition on still holding this exact version (fencing).
-  // That check is not implemented yet.
+  // The ownership generation this claim produced. Renewal and completion
+  // both condition on still holding this exact version.
   leaseVersion: number;
+  // Informational only. The worker never compares this against its own
+  // clock to decide whether it still owns the step; the database decides
+  // that on every renewal/completion write.
   leaseExpiresAt: Date;
   priority: number;
   availableAt: Date;
@@ -102,7 +104,12 @@ type ClaimedRow = {
 export async function claimNextStep<TSchema extends Record<string, unknown>>(
   db: NodePgDatabase<TSchema>,
   workerId: string,
+  // Defaults to STEP_LEASE_DURATION_MS. Injectable so tests can let a real
+  // claim-produced lease expire in milliseconds instead of 30 seconds.
+  options: { leaseDurationMs?: number } = {},
 ): Promise<ClaimResult> {
+  const leaseDurationMs = options.leaseDurationMs ?? STEP_LEASE_DURATION_MS;
+
   if (workerId.trim().length === 0) {
     // A blank owner would produce a RUNNING row whose owner cannot be
     // identified, which is the one thing a claim is supposed to establish.
@@ -174,7 +181,7 @@ export async function claimNextStep<TSchema extends Record<string, unknown>>(
       set status = 'RUNNING',
           current_worker_id = ${workerId},
           lease_version = lease_version + 1,
-          lease_expires_at = clock_timestamp() + (${STEP_LEASE_DURATION_MS}::int * interval '1 millisecond'),
+          lease_expires_at = clock_timestamp() + (${leaseDurationMs}::int * interval '1 millisecond'),
           updated_at = now()
       where id = ${candidate.id}
         and status = 'READY'
