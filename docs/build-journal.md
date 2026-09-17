@@ -42,3 +42,16 @@ not a routine setup log.
 - The `vite` CLI takes the project root as a positional argument
   (`vite web`), not a `--root` flag — `vite --root web` fails with
   `Unknown option --root`. Fixed the `dev:web` script accordingly.
+
+## 2026-09-16 — Milestone 3 claiming
+
+- The first version of the claim computed `lease_expires_at` from `now()`,
+  and a comment in it listed "the same instant is reused for the lease
+  deadline" as a benefit. That was wrong. PostgreSQL's `now()` is fixed at
+  transaction start, so any delay between `BEGIN` and the ownership
+  `UPDATE` quietly came off the lease: a claimer could commit ownership of
+  a "30-second" lease with noticeably less than 30 seconds left. Caught in
+  review before commit. Changed the deadline to `clock_timestamp()` (the
+  database's actual time when the `UPDATE` runs), kept `now()` for
+  eligibility, and added a test that fails if the deadline goes back to
+  being measured from transaction start.

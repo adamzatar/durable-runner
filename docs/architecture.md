@@ -50,15 +50,16 @@ later makes one worthwhile — not created speculatively up front.
 ### Task state machine
 
 States: `PENDING`, `READY`, `RUNNING`, `RETRY_WAIT`, `SUCCEEDED`,
-`DEAD_LETTERED`, `CANCELLED`. Ownership (current worker, lease expiry, lease
-version) is metadata attached to a step while it's `RUNNING`, not a separate
-state, unless building it that way turns out to be materially simpler than
-a `LEASED` state — that hasn't been tested yet. Transitions and their
-legality are centralized in `server/src/domain/step-status.ts` and
-`server/src/domain/step-transitions.ts` (Milestone 2), covered by tests,
-before any queue/claiming logic is built on top of them. That module is
-pure — it validates transition shape only, with no I/O and no knowledge of
-lease ownership or attempt counts.
+`DEAD_LETTERED`, `CANCELLED`. There is no separate `LEASED` state:
+ownership (current worker, lease expiry, lease version) is metadata on a
+`RUNNING` step, stored as columns on `steps` (Milestone 3). Transitions and
+their legality are centralized in `server/src/domain/step-status.ts` and
+`server/src/domain/step-transitions.ts` (Milestone 2), covered by tests.
+That module is pure — it validates transition shape only, with no I/O and
+no knowledge of lease ownership or attempt counts. The claim transaction
+(below) is the persistence-layer authority for the `READY -> RUNNING`
+write, and checks that edge against the module while it holds the row
+lock.
 
 Cancellation is legal only from `PENDING`, `READY`, or `RETRY_WAIT` — never
 directly from `RUNNING`, since a raw status flip would race the owning
@@ -67,23 +68,89 @@ a cooperative mechanism, not yet built.
 
 ### Claiming, leases, fencing
 
-- A step is claimed inside a single transaction: begin, `SELECT` the
-  highest-priority eligible `READY` step with `FOR UPDATE SKIP LOCKED`,
-  update that same row to `RUNNING` with `current_worker_id` assigned,
-  `lease_version` incremented, and `lease_expires_at` set, then commit. Row
-  locking (not a conditional `UPDATE`) is the first implementation: two
-  workers searching concurrently must never land on the same row, and a
-  worker should skip a row another claimer currently holds locked rather
-  than blocking on it. The eventual code may express this as a CTE or
-  another concise formulation as long as it preserves exactly that
-  behavior — lock, mutate, commit as one boundary. The concurrency test for
-  this (Milestone 3) should deliberately launch several claimers at once
-  against a small set of available rows and assert exclusive ownership per
-  row, not just "no errors thrown."
+Implemented in Milestone 3: the `steps` table and claiming
+(`server/src/db/claim-step.ts`). Not implemented yet: worker loops,
+heartbeats, lease expiry/recovery, fencing, retries.
+
+- **Table.** `steps` holds `id` (random uuid), `status` (a PostgreSQL enum
+  generated from `STEP_STATUSES`), `priority`, `available_at`,
+  `current_worker_id`, `lease_version`, `lease_expires_at`, `created_at`,
+  `updated_at`. A CHECK constraint requires every `RUNNING` row to have
+  `current_worker_id IS NOT NULL`, `lease_expires_at IS NOT NULL`, and
+  `lease_version > 0`. It does not validate the worker ID's content, so an
+  empty or whitespace-only ID would satisfy it; `claimNextStep` separately
+  rejects blank worker IDs. The CHECK only constrains `RUNNING` rows and
+  doesn't decide what later transitions do with these columns.
+- **Eligibility.** `status = 'READY' AND available_at <= now()`, where
+  `now()` is the database's transaction start time. No dependency graph or
+  run-level scheduling exists yet.
+- **Ordering.** `priority DESC, available_at ASC, id ASC`: higher priority
+  number first, then the step that became available earliest, then uuid
+  as a total-order tie-break.
+- **Transaction.** Drizzle's `db.transaction()` pins one connection and
+  runs `BEGIN`; then, as raw SQL:
+  1. `SELECT id, status ... ORDER BY ... LIMIT 1 FOR UPDATE SKIP LOCKED`.
+     No row means `{ claimed: false }`.
+  2. With the row locked, `READY -> RUNNING` is checked against
+     `step-transitions.ts`.
+  3. `UPDATE steps SET status = 'RUNNING', current_worker_id = $worker,
+     lease_version = lease_version + 1, lease_expires_at =
+     clock_timestamp() + 30s, updated_at = now() WHERE id = $id AND status =
+     'READY' RETURNING ...`.
+  4. Anything other than exactly one returned row throws and rolls back.
+  5. `COMMIT`. The claim does not exist until this succeeds.
+- **Why two statements and raw SQL.** A single `WITH ... UPDATE` CTE would
+  work and save a round trip, but "the CTE found nothing" and "the CTE
+  found a row the UPDATE then didn't match" would both come back as zero
+  rows. Keeping them separate lets the second case fail loudly instead of
+  being reported as no work. Raw SQL (rather than Drizzle's select builder
+  with `.for("update", { skipLocked: true })`) keeps the exact locking
+  query readable in one place.
+- **Why READ COMMITTED is enough.** Exclusivity comes from the row lock,
+  not the snapshot. A row locked by an in-flight claimer is skipped. A row
+  claimed by a transaction that has already committed is no longer locked,
+  so it isn't skipped; PostgreSQL re-reads the latest committed version,
+  re-applies the `WHERE`, sees `RUNNING`, and drops it. REPEATABLE READ
+  would turn that case into a serialization error the caller would have to
+  retry.
+- **Index.** One partial index, `(priority DESC, available_at ASC, id ASC)
+  WHERE status = 'READY'`, matching the claim's status filter and sort
+  order and excluding `RUNNING`/terminal rows. The `available_at <= now()`
+  condition is still checked per candidate. Nothing has been measured.
+- **`lease_version`.** Starts at `0`, meaning never owned. Every successful
+  claim increments it and never resets it, so a reclaim always produces a
+  version no earlier owner could hold. The claim returns the version it
+  wrote. Heartbeats, when built, must not change it: it marks a change of
+  owner, not a lease extension.
+- **`lease_expires_at`.** Written at claim time as `clock_timestamp()` plus
+  the lease duration. The lease is timed from the ownership `UPDATE`, not
+  from `BEGIN` (`now()` would silently shorten it by however long the
+  transaction took to get there) and not exactly from `COMMIT` either
+  (PostgreSQL doesn't expose that instant inside the transaction). **It is
+  recorded but not enforced**: nothing sweeps expired leases, expiry does
+  not make a step claimable again, and the owner is never told its lease
+  lapsed.
+- **Tests** (`server/tests/claim-step.test.ts`). Each claimer has its own
+  single-connection pool, so claims overlap as separate PostgreSQL backends.
+  They are logical claimers inside the one Vitest process, not separate OS
+  processes. 12 claimers race for 3 steps and 16 for 1; the tests assert
+  exactly N claims, no step returned twice, and one distinct owner per
+  persisted row. A second connection holds `FOR UPDATE` on the
+  highest-priority row while a claimer runs; the claimer must take the
+  lower-priority row, or report no work if no other row exists, instead
+  of waiting for the locked row. Claimers do not wait on candidate step
+  rows locked by other claim transactions; `SKIP LOCKED` makes them search
+  for another eligible row instead. That says nothing about waits for
+  unrelated PostgreSQL locks or infrastructure reasons. The tests were checked against deliberately broken versions:
+  removing the locking clause, removing the locking clause and the UPDATE
+  status guard, and dropping only `SKIP LOCKED` each make the relevant
+  tests fail.
 - A worker's completion write must be conditioned on still holding the
   lease version it claimed with. If another worker has since reclaimed the
   step (higher lease version), the stale write affects zero rows and is
-  rejected. This is fencing.
+  rejected. This is fencing. *Not implemented yet* — `lease_version` exists
+  and is returned by the claim so this check has something to condition
+  on.
 - Fencing prevents a stale *write*, not a stale *side effect*. A worker
   whose lease expired may have already performed an external action before
   it lost ownership. That's a separate problem, handled by idempotency.

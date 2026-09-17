@@ -1,8 +1,8 @@
 import { defineConfig } from "drizzle-kit";
 
-// Spike-only config: points at the one spike table defined in
-// server/src/db/schema.ts. Will be revisited once the real schema
-// (runs/steps/workers/attempts/events) replaces it.
+// Generates migrations from server/src/db/schema.ts, which holds both the
+// real `steps` table (Milestone 3) and the retained Phase 0 `spike_events`
+// table. Other tables are added there only when a milestone needs them.
 export default defineConfig({
   dialect: "postgresql",
   schema: "./server/src/db/schema.ts",

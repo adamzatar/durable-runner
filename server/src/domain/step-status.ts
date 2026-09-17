@@ -26,3 +26,15 @@ const TERMINAL_STEP_STATUSES: ReadonlySet<StepStatus> = new Set([
 export function isTerminalStepStatus(status: StepStatus): boolean {
   return TERMINAL_STEP_STATUSES.has(status);
 }
+
+// Narrows a value read back from an untyped boundary (a raw SQL row) to a
+// StepStatus. The database column is an enum built from STEP_STATUSES, so
+// this should never throw in practice — it exists so that a mismatch
+// between the database type and this list surfaces as a loud error at the
+// boundary rather than as a silently mistyped string flowing inward.
+export function parseStepStatus(value: unknown): StepStatus {
+  if (typeof value === "string" && (STEP_STATUSES as readonly string[]).includes(value)) {
+    return value as StepStatus;
+  }
+  throw new Error(`Not a valid step status: ${JSON.stringify(value)}`);
+}
