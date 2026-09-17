@@ -49,13 +49,21 @@ later makes one worthwhile — not created speculatively up front.
 
 ### Task state machine
 
-Candidate states: `PENDING`, `READY`, `RUNNING`, `RETRY_WAIT`, `SUCCEEDED`,
+States: `PENDING`, `READY`, `RUNNING`, `RETRY_WAIT`, `SUCCEEDED`,
 `DEAD_LETTERED`, `CANCELLED`. Ownership (current worker, lease expiry, lease
 version) is metadata attached to a step while it's `RUNNING`, not a separate
 state, unless building it that way turns out to be materially simpler than
-a `LEASED` state — that hasn't been tested yet. Transitions are centralized
-in one module and covered by tests before any queue/claiming logic is
-built on top of them.
+a `LEASED` state — that hasn't been tested yet. Transitions and their
+legality are centralized in `server/src/domain/step-status.ts` and
+`server/src/domain/step-transitions.ts` (Milestone 2), covered by tests,
+before any queue/claiming logic is built on top of them. That module is
+pure — it validates transition shape only, with no I/O and no knowledge of
+lease ownership or attempt counts.
+
+Cancellation is legal only from `PENDING`, `READY`, or `RETRY_WAIT` — never
+directly from `RUNNING`, since a raw status flip would race the owning
+worker's own completion/failure write. Cancelling in-flight work will need
+a cooperative mechanism, not yet built.
 
 ### Claiming, leases, fencing
 
@@ -85,11 +93,20 @@ built on top of them.
 
 ### Retries
 
-Failed steps become `RETRY_WAIT` and become `READY` again after an
-exponential backoff delay, up to `max_attempts`, after which they become
-`DEAD_LETTERED`. Backoff scheduling logic is expected to be hand-written —
-this is core "difficult behavior" for the project, not something to
-delegate to a library.
+Whether a `RUNNING` failure is retryable, and whether the attempt budget
+remains, is decided once, at failure time. A retryable failure with
+attempts remaining becomes `RETRY_WAIT`, meaning that decision has already
+been made: once its backoff delay expires, if the system processes it and
+it hasn't been cancelled, its only legal next transition is `READY` —
+`RETRY_WAIT` never dead-letters directly. A non-retryable failure, or one
+with no attempts remaining, becomes `DEAD_LETTERED` directly from
+`RUNNING`, skipping the wait. This describes transition legality, not
+liveness: nothing here guarantees a coordinator will actually process an
+expired backoff in a timely way, or at all — a crashed or unavailable
+coordinator could leave a step in `RETRY_WAIT` indefinitely without that
+being an illegal state. Backoff scheduling logic is expected to be
+hand-written — this is core "difficult behavior" for the project, not
+something to delegate to a library.
 
 ### Idempotency
 
