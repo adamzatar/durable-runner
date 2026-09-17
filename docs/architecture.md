@@ -158,6 +158,147 @@ heartbeats, lease expiry/recovery, fencing, retries.
   worker may still be alive and may still attempt to act — the system is
   built assuming that will happen sometimes, not as an edge case.
 
+### Worker execution (Milestone 4)
+
+Implemented: task representation on `steps`, one deterministic executor,
+the completion write, the real worker loop, and a real (non-spike) worker
+process entrypoint. Not implemented: heartbeats, lease-expiry recovery,
+retries, idempotency, verification, durable events.
+
+Demonstrated concretely as multiple local OS child worker processes on one
+machine, sharing one PostgreSQL instance as their only coordination
+mechanism (`npm run demo:workers`). This does not validate separate
+physical machines, nor has it been re-confirmed on the Replit Reserved VM
+mentioned in the Phase 0 notes above — both remain open questions, not
+claims this milestone makes.
+
+- **Task representation.** `steps` gained `task_type` (`text`, not null, no
+  default), `payload` (`jsonb`, not null, no default), and `result`
+  (`jsonb`, nullable — set only on success). `task_type` is a plain text
+  column validated at execution time by `parseTaskType`
+  (`server/src/domain/task-type.ts`), not a Postgres enum like
+  `step_status`: the type set is expected to grow, and an enum would need
+  an `ALTER TYPE ... ADD VALUE` migration per new task, unlike the closed
+  lifecycle `step_status` represents. `claimNextStep`'s `RETURNING` clause
+  now also returns `task_type`/`payload`, passed through unvalidated — the
+  claim transaction owns locking/ownership, not task semantics.
+  - **Migration assumption.** `0002_last_eddie_brock.sql` adds `task_type`
+    and `payload` as `NOT NULL` with no `DEFAULT`. Confirmed directly
+    (against a scratch table, not `steps`): `ALTER TABLE ... ADD COLUMN
+    ... NOT NULL` with no default fails against a table that already has
+    rows — `ERROR: column "task_type" of relation "..." contains null
+    values` — because it has nothing non-null to put in them. This
+    migration therefore only applies cleanly to an empty `steps` table.
+    That's a real precondition of this specific migration, not a
+    hypothetical: before Milestone 4 there was no real submission/
+    execution pathway writing durable steps, so there is no application
+    data to preserve, and no fake `task_type`/`payload` was invented to
+    backfill hypothetical old rows. This is a development-time assumption
+    about this repo's actual history, not a production migration
+    guarantee — a later milestone adding a `NOT NULL` column to a table
+    that genuinely holds rows would need a default or a backfill step,
+    and should not assume this precedent still applies.
+- **Executor.** One supported task, `hash_after_delay`: payload
+  `{ input: string, delayMs: number }`, waits `delayMs` (validated
+  `0 <= delayMs <= 5000`; the cap exists so a bad payload can't stall a
+  worker indefinitely, the range exists so a demo can make workers
+  visibly overlap), then returns `{ hash: sha256(input) hex }`.
+  Deterministic, side-effect-free, and validated explicitly (no schema
+  library) — an invalid persisted payload throws rather than being
+  silently coerced or retried. One `switch` in
+  `server/src/worker/execute-step.ts`, not a registry: adding a task type
+  means adding a case, not registering a plugin.
+- **Completion.** `completeStepSuccess` (`server/src/db/complete-step.ts`)
+  is one atomic `UPDATE ... WHERE id = $id AND status = 'RUNNING' AND
+  current_worker_id = $workerId AND lease_version = $leaseVersion
+  RETURNING id`, preceded by a static `transitionStepStatus("RUNNING",
+  "SUCCEEDED")` call (same pattern as the claim routing its transition
+  through the Milestone 2 table). Anything other than exactly one
+  returned row throws `CompletionConsistencyError` and the row is left
+  untouched — the caller cannot tell from that alone whether the step was
+  already terminal, owned by someone else, or at a stale lease version,
+  only that its own ownership generation no longer matches, which is
+  enough to refuse the write safely.
+  - This is an **ownership-generation predicate**, and it is
+    fencing-compatible, but it is not yet a demonstration of fencing: no
+    lease-expiry recovery exists yet, so no second worker can currently
+    reclaim a `RUNNING` step out from under its owner. The predicate has
+    something to condition on today only because `claimNextStep` already
+    returns `lease_version`; the adversarial "stale owner writes after
+    being fenced out by a real reclaim" scenario is for the recovery
+    milestone.
+  - Fencing (this predicate) stops a stale *write*. It says nothing about
+    a stale worker having already performed an external side effect
+    before losing ownership — that is idempotency's job, not built yet.
+- **Ownership fields on success.** `current_worker_id` and
+  `lease_expires_at` are cleared; `lease_version` is preserved, never
+  reset — a terminal step has no active owner, but the ownership
+  generations it went through remain meaningful history. This is
+  compatible with `steps_running_requires_owner`, which only constrains
+  `RUNNING` rows.
+  - No `completed_by_worker_id` column was added. Clearing
+    `current_worker_id` does lose durable attribution, but persisting it
+    twice (once as a point-in-time column, again later in durable event
+    history) isn't worth it for this milestone. Attribution for now comes
+    from each worker process's own stdout log line at completion time —
+    see the demo command below — and durable attribution is left to the
+    event-history table when that's built.
+- **Worker loop.** `runWorkerLoop` (`server/src/worker/worker-loop.ts`):
+  claim → if nothing claimed, sleep a fixed poll interval (500ms,
+  interruptible by shutdown) and retry → if claimed, execute, then
+  complete. Sequential, not concurrent within one loop: a worker process
+  holds at most one active claimed step at a time. More throughput comes
+  from running more worker processes, not from one loop claiming multiple
+  steps at once. Shutdown is checked between iterations only — a signal
+  abort stops a new claim from starting (or cuts an idle poll wait short)
+  but never interrupts a step already claimed.
+  - **Unexpected errors.** Two distinct cases, both logged with the loop
+    continuing to the next iteration — no retry, no backoff, no reset to
+    `READY`, no lease-version change in either case:
+    - If `executeStep` throws, this worker makes no completion write at
+      all. In the current system, with no lease-expiry recovery, nothing
+      else can act on the step either, so it stays `RUNNING` until
+      recovery exists.
+    - If `completeStepSuccess` throws `CompletionConsistencyError`, the
+      completion `UPDATE` matched zero rows and made no mutation — this
+      worker's ownership-generation predicate was rejected. That does
+      *not* mean the row is still `RUNNING` under this worker: once
+      lease-expiry recovery and reclaiming exist, a zero-row match could
+      mean another worker had already reclaimed or completed the step by
+      then. Today, with no reclaim path built, this case is not expected
+      to occur in normal operation.
+- **Worker process.** `server/src/worker/worker.ts` — separate from the
+  Phase 0 `spike-worker.ts`, which is retained and untouched. Worker ID
+  from `argv[2]`, then `WORKER_ID`, then a generated UUID. Own
+  `Pool`/Drizzle connection. `SIGTERM`/`SIGINT` abort the loop, which
+  finishes its current step (if any), then the process closes its pool
+  and exits. No Node IPC anywhere — coordination is Postgres rows only.
+- **Demo.** `npm run demo:workers` (`server/src/worker/run-demo.ts`)
+  inserts a handful of `hash_after_delay` steps, spawns 3 real
+  `worker.ts` **child processes** via `child_process.spawn` (same
+  mechanism as the Phase 0 `run-experiment.ts`), polls Postgres until
+  every step is `SUCCEEDED`, prints the durable results, then stops the
+  workers. Worker-to-task attribution is visible from each child's
+  inherited stdout, not from a database column.
+- **Tests.**
+  `execute-step.test.ts`: pure executor unit tests (deterministic hash,
+  invalid-payload rejection).
+  `complete-step.test.ts`: claim → execute → complete happy path (asserts
+  terminal ownership shape and preserved `lease_version`), plus
+  wrong-worker, stale-lease-version, and non-`RUNNING` completion attempts
+  (all rejected, row untouched).
+  `worker-loop.test.ts`: the real loop against real Postgres, driving
+  several `READY` rows to `SUCCEEDED` across multiple **logical** worker
+  loops (separate single-connection pools inside one Vitest process — the
+  same convention `claim-step.test.ts` uses for its contention tests),
+  plus a graceful-shutdown-during-idle-poll test. This is not a test of OS
+  process isolation; the child-process case is exercised only by
+  `demo:workers`, run manually.
+  Because `complete-step.test.ts` and `worker-loop.test.ts` now also write
+  to `steps`, `vitest.config.ts` sets `fileParallelism: false` so test
+  files don't interleave writes/locks on that table — `claim-step.test.ts`
+  had already flagged this as a future requirement.
+
 ### Retries
 
 Whether a `RUNNING` failure is retryable, and whether the attempt budget

@@ -15,6 +15,13 @@
       "when": 1789612818110,
       "tag": "0001_jittery_alex_wilder",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789615388293,
+      "tag": "0002_last_eddie_brock",
+      "breakpoints": true
     }
   ]
 }

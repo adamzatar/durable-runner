@@ -25,6 +25,11 @@ export interface ClaimedStep {
   leaseExpiresAt: Date;
   priority: number;
   availableAt: Date;
+  // What to execute and its input. Passed through as-written — this module
+  // only owns locking/ownership, not task semantics; validating taskType
+  // and payload is the executor's job (see worker/execute-step.ts).
+  taskType: string;
+  payload: unknown;
 }
 
 // "No work" is a first-class outcome, not an absence. A claimer that finds
@@ -59,6 +64,8 @@ type ClaimedRow = {
   lease_expires_at: Date;
   priority: number;
   available_at: Date;
+  task_type: string;
+  payload: unknown;
 };
 
 /**
@@ -171,7 +178,7 @@ export async function claimNextStep<TSchema extends Record<string, unknown>>(
           updated_at = now()
       where id = ${candidate.id}
         and status = 'READY'
-      returning id, status, current_worker_id, lease_version, lease_expires_at, priority, available_at
+      returning id, status, current_worker_id, lease_version, lease_expires_at, priority, available_at, task_type, payload
     `);
 
     if (claimed.rows.length !== 1) {
@@ -193,6 +200,8 @@ export async function claimNextStep<TSchema extends Record<string, unknown>>(
         leaseExpiresAt: row.lease_expires_at,
         priority: row.priority,
         availableAt: row.available_at,
+        taskType: row.task_type,
+        payload: row.payload,
       },
     };
     // The claim is only real once this callback returns and Drizzle

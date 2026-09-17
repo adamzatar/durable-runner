@@ -8,6 +8,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx server/src/db/migrate.ts",
     "spike:workers": "tsx server/src/worker/run-experiment.ts",
+    "worker": "tsx server/src/worker/worker.ts",
+    "demo:workers": "tsx server/src/worker/run-demo.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p server/tsconfig.json && tsc --noEmit -p web/tsconfig.json",
     "build:web": "vite build web --config web/vite.config.ts",

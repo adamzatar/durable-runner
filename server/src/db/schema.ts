@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, pgEnum, pgTable, serial, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { check, index, integer, jsonb, pgEnum, pgTable, serial, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { STEP_STATUSES } from "../domain/step-status.js";
 
 // SPIKE-ONLY TABLE. Exists to prove that a real Drizzle migration, plus
@@ -49,6 +49,18 @@ export const steps = pgTable(
     // no expiry check, no reclaim. An expired value currently has no
     // effect on eligibility or on the owning worker.
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    // What a worker should execute. No default, same reasoning as status:
+    // a caller must state what a step does, rather than silently getting a
+    // placeholder task. Validity of the value (is this a task type a
+    // worker actually knows how to run?) is checked at execution time by
+    // parseTaskType, not by the database.
+    taskType: text("task_type").notNull(),
+    // Structured input for task_type. No default for the same reason as
+    // task_type: every step must state its own input explicitly.
+    payload: jsonb("payload").notNull(),
+    // Structured output. Null until a step reaches SUCCEEDED; nothing
+    // else currently writes it.
+    result: jsonb("result"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     // Maintained by the writing statement, not by a trigger — the claim
     // sets it in the same UPDATE that takes ownership.

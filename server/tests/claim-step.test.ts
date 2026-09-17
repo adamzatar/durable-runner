@@ -13,8 +13,9 @@ import type { StepStatus } from "../src/domain/step-status.js";
 // every row before each test so results never depend on what a previous
 // run (or the Phase 0 spike) left behind in the development database.
 // Assertions still reference explicitly inserted IDs rather than global
-// counts. If another test file ever starts writing to `steps`, these tests
-// need `fileParallelism: false` — today this is the only one.
+// counts. complete-step.test.ts and worker-loop.test.ts also write to
+// `steps` now, which is why vitest.config.ts sets `fileParallelism: false`
+// — without it, one file's deletes/locks would interfere with another's.
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error("DATABASE_URL is not set");
@@ -45,6 +46,12 @@ async function createClaimer(workerId: string): Promise<Claimer> {
   return { workerId, db: drizzle(pool), pool };
 }
 
+// task_type/payload are required by the steps table (Milestone 4) but are
+// irrelevant to claim mechanics, which is all this file tests — every
+// fixture row gets the same fixed, valid value.
+const FIXTURE_TASK_TYPE = "hash_after_delay";
+const FIXTURE_PAYLOAD = JSON.stringify({ input: "claim-step-fixture", delayMs: 0 });
+
 async function insertStep(opts: {
   id?: string;
   status?: StepStatus;
@@ -56,7 +63,7 @@ async function insertStep(opts: {
 }): Promise<string> {
   const id = opts.id ?? randomUUID();
   await admin.query(
-    `insert into steps (id, status, priority, available_at, lease_version, current_worker_id, lease_expires_at)
+    `insert into steps (id, status, priority, available_at, lease_version, current_worker_id, lease_expires_at, task_type, payload)
      values (
        $1,
        $2::step_status,
@@ -65,7 +72,9 @@ async function insertStep(opts: {
        $5,
        $6,
        case when $7::int is null then null
-            else now() + ($7::int * interval '1 millisecond') end
+            else now() + ($7::int * interval '1 millisecond') end,
+       $8,
+       $9::jsonb
      )`,
     [
       id,
@@ -75,6 +84,8 @@ async function insertStep(opts: {
       opts.leaseVersion ?? 0,
       opts.currentWorkerId ?? null,
       opts.leaseExpiresOffsetMs ?? null,
+      FIXTURE_TASK_TYPE,
+      FIXTURE_PAYLOAD,
     ],
   );
   return id;
@@ -454,10 +465,10 @@ describe("claimNextStep", () => {
       // One statement, so now() is identical for both rows and the tie is
       // genuinely exact rather than microseconds apart.
       await admin.query(
-        `insert into steps (id, status, priority, available_at)
-         values ($1, 'READY', 0, now() - interval '1 second'),
-                ($2, 'READY', 0, now() - interval '1 second')`,
-        [first, second],
+        `insert into steps (id, status, priority, available_at, task_type, payload)
+         values ($1, 'READY', 0, now() - interval '1 second', $3, $4::jsonb),
+                ($2, 'READY', 0, now() - interval '1 second', $3, $4::jsonb)`,
+        [first, second, FIXTURE_TASK_TYPE, FIXTURE_PAYLOAD],
       );
 
       const order: string[] = [];
@@ -577,7 +588,10 @@ describe("claimNextStep", () => {
   describe("database-enforced ownership invariant", () => {
     it("refuses to store a RUNNING step with no owner, deadline, or ownership generation", async () => {
       await expect(
-        admin.query(`insert into steps (id, status) values ($1, 'RUNNING')`, [randomUUID()]),
+        admin.query(
+          `insert into steps (id, status, task_type, payload) values ($1, 'RUNNING', $2, $3::jsonb)`,
+          [randomUUID(), FIXTURE_TASK_TYPE, FIXTURE_PAYLOAD],
+        ),
       ).rejects.toThrow(/steps_running_requires_owner/);
     });
   });
