@@ -149,3 +149,36 @@ not a routine setup log.
   v2, and the 40s step completed at v1. The killed worker's heartbeat did
   not advance after the post-kill baseline. All recorded demo processes
   and their remaining helpers were verified gone afterward.
+
+## 2026-09-17 — Milestone 6 stale-owner fencing
+
+- The existing production predicates needed no change. Added four real
+  PostgreSQL tests that actually claim v1, wait for database-confirmed expiry,
+  recover READY v1, and claim v2. Completion and renewal reject stale v1
+  with different worker IDs and with the same ID reused on a separate
+  connection. The same-ID cases keep v2 RUNNING and live before and after
+  rejection, isolating the version term. Full JSON row comparisons retain
+  timestamp microseconds and verify rejection writes nothing; v2 can then
+  renew and complete. Each test checks `0 -> 1 -> 1 -> 2 -> 2`.
+- Removed only the completion version predicate temporarily: the same-ID
+  test failed because its stale completion resolved successfully. Restored
+  it, then removed only the renewal version predicate: that same-ID test
+  failed with `renewed: true`. Restored both guards. No new fencing bug was
+  found in the original write paths, and no architecture decision changed.
+- Added an executor-start log after invoking the existing executor and a
+  direct-Node SIGSTOP/SIGCONT demo. The logged worker PID matched the child
+  being signalled, and `ps` reported it stopped. Samples showed unchanged
+  RUNNING v1 before expiry, no post-stop heartbeat advancement, READY v1
+  after database-confirmed expiry, and B claiming and completing v2. B's
+  startup is delayed until READY is sampled so that state cannot be missed.
+- Both demo runs resumed the same A PID with its original executor pending.
+  An overdue renewal fired and was rejected; completion was still attempted
+  with v1 and rejected with zero rows. The entire v2 terminal row remained
+  unchanged through A's attempt and child shutdown. All children shut down
+  cleanly. This different-ID, terminal-state demo demonstrates the real
+  resumed execution; the live same-ID tests isolate generation fencing.
+- Validation: 110 tests across 12 files passed. Three additional fencing
+  runs passed all four tests each. Both real demos passed. Schema generation
+  found no changes; migration, typecheck, build, and diff whitespace checks
+  passed. The demo does not establish an exact recovery instant, and none
+  of this protects external effects or provides exactly-once execution.

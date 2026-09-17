@@ -72,9 +72,9 @@ a cooperative mechanism, not yet built.
 
 Implemented in Milestone 3: the `steps` table and claiming
 (`server/src/db/claim-step.ts`). Worker loops followed in Milestone 4;
-heartbeats, lease renewal, expiry and recovery in Milestone 5 (see below).
-Not implemented yet: the stale-owner-after-reclaim fencing scenario,
-retries.
+heartbeats, lease renewal, expiry and recovery in Milestone 5; demonstrated
+stale-owner fencing after reclaim in Milestone 6 (see below). Retries are
+not implemented yet.
 
 - **Table.** `steps` holds `id` (random uuid), `status` (a PostgreSQL enum
   generated from `STEP_STATUSES`), `priority`, `available_at`,
@@ -152,10 +152,10 @@ retries.
 - A worker's completion write is conditioned on still holding the lease
   version it claimed with (Milestone 4). If another worker has since
   reclaimed the step (higher lease version), the stale write affects zero
-  rows and is rejected. This is fencing. The predicate exists and recovery
-  now makes a reclaim possible, but the adversarial scenario — a stale
-  owner resuming after a reclaim and attempting completion — has not been
-  exercised yet (Milestone 6).
+  rows and is rejected. This is fencing. Milestone 6 demonstrates an old
+  execution resuming after reclaim in real processes, and isolates the
+  version predicate with same-worker-ID database tests while the newer
+  generation is still RUNNING with a live lease.
 - Fencing prevents a stale *write*, not a stale *side effect*. A worker
   whose lease expired may have already performed an external action before
   it lost ownership. That's a separate problem, handled by idempotency.
@@ -215,8 +215,9 @@ claims this milestone makes.
   silently coerced or retried. One `switch` in
   `server/src/worker/execute-step.ts`, not a registry: adding a task type
   means adding a case, not registering a plugin.
-- **Completion.** `completeStepSuccess` (`server/src/db/complete-step.ts`)
-  is one atomic `UPDATE ... WHERE id = $id AND status = 'RUNNING' AND
+- **Completion.** In Milestone 4, `completeStepSuccess`
+  (`server/src/db/complete-step.ts`) was one atomic
+  `UPDATE ... WHERE id = $id AND status = 'RUNNING' AND
   current_worker_id = $workerId AND lease_version = $leaseVersion
   RETURNING id`, preceded by a static `transitionStepStatus("RUNNING",
   "SUCCEEDED")` call (same pattern as the claim routing its transition
@@ -227,17 +228,17 @@ claims this milestone makes.
   only that its own ownership generation no longer matches, which is
   enough to refuse the write safely.
   - Milestone 5 added a second condition, `lease_expires_at >
-    clock_timestamp()`, so completion also requires an unexpired lease.
+    clock_timestamp()`, and an ID-only row lock in a preceding statement
+    within the same transaction, so completion requires a lease that is
+    still unexpired when authorized after the lock wait.
     See the Milestone 5 section and
     `docs/decisions/0001-lease-deadline-is-authority.md`.
   - This is an **ownership-generation predicate**, and it is
     fencing-compatible, but it was not a demonstration of fencing in
     Milestone 4: no lease-expiry recovery existed, so no second worker
-    could reclaim a `RUNNING` step out from under its owner. The predicate has
-    something to condition on today only because `claimNextStep` already
-    returns `lease_version`; the adversarial "stale owner writes after
-    being fenced out by a real reclaim" scenario is for the recovery
-    milestone.
+    could reclaim a `RUNNING` step out from under its owner. Milestone 5
+    supplied recovery; Milestone 6 demonstrates stale writes rejected after
+    real expiry, recovery, and reclaim, including reuse of the worker ID.
   - Fencing (this predicate) stops a stale *write*. It says nothing about
     a stale worker having already performed an external side effect
     before losing ownership — that is idempotency's job, not built yet.
@@ -318,9 +319,9 @@ Implemented: a `workers` table and heartbeats, renewal of the active
 step's lease while it executes, the lease deadline as the limit on an
 owner's renewal and completion writes, expired-lease recovery, a
 coordinator process running the recovery sweep, and a real child-process
-crash/recovery demo. Not implemented: a stale owner resuming after a
-reclaim and attempting completion (Milestone 6), retries or attempt
-budgets, idempotency, verification, durable events, UI.
+crash/recovery demo. Milestone 6 below adds the demonstration of a stale
+owner resuming after reclaim and attempting completion. Retries, attempt
+budgets, idempotency, verification, durable events, and UI remain unimplemented.
 
 - **Two facts, two jobs.**
   - A *heartbeat* (`workers.last_heartbeat_at`) means only "a process using
@@ -680,6 +681,108 @@ budgets, idempotency, verification, durable events, UI.
     unlocked rows can now recover in bounded batches.
   - Protection against database wall-clock rollback across an expired
     deadline before recovery durably changes the row.
+
+### Stale-owner fencing (Milestone 6)
+
+Durable Runner uses increasing ownership generations (`lease_version`) as
+fencing tokens: a worker carrying generation N cannot renew or complete
+durable step state owned by generation N+1. The production write predicates
+already supplied this protection; this milestone adds direct evidence.
+
+Three mechanisms have distinct jobs:
+
+- **Lease authority:** bounds an owner's authority by PostgreSQL wall time,
+  even before a recovery sweep. Both renewal and completion require an
+  unexpired deadline. The Milestone 5 wall-clock assumption still applies.
+- **Recovery:** clears expired ownership and returns the step to READY,
+  preserving its generation. It makes the work claimable again.
+- **Fencing:** rejects writes carrying a superseded generation after a
+  fresh claim increments the version. The stored live deadline now belongs
+  to the new owner, so checking that deadline alone cannot reject the old one.
+
+```text
+A claims v4
+A freezes
+v4 expires
+recovery -> READY v4
+B claims -> RUNNING v5 with a live deadline
+A wakes
+A's v4 completion/renewal -> zero rows, rejected
+```
+
+Worker ID is not a process lifetime. If A1 and A2 both use `worker-a`, then
+after recovery and A2's claim the stored worker ID still matches A1's stale
+request. With RUNNING status and A2's live deadline, `lease_version` is the
+only false term in A1's authorization predicate. This is why checking the
+worker ID without its claimed generation is insufficient.
+
+Renewal and completion retain their Milestone 5 transaction structure,
+under READ COMMITTED on a single connection:
+
+```sql
+BEGIN;
+SELECT id FROM steps WHERE id = $id FOR UPDATE;
+-- Then UPDATE with the complete authorization predicate:
+-- WHERE id = $id
+--   AND status = 'RUNNING'
+--   AND current_worker_id = $worker
+--   AND lease_version = $claimed_version
+--   AND lease_expires_at > clock_timestamp()
+COMMIT;
+```
+
+The first statement acquires the row lock without deciding authority. The
+second statement has a fresh snapshot and evaluates authority after the
+lock wait. A zero-row UPDATE rejects the operation without compensating
+writes. Renewal returns `renewed: false`; completion raises
+`CompletionConsistencyError` after releasing the lock. The worker stops a
+rejected renewal loop, lets its executor finish, and reauthorizes completion
+in PostgreSQL. It logs rejection and moves on to ordinary fresh claiming;
+it never resets ownership or retries a stale completion as compensation.
+
+**Database evidence** (`server/tests/fencing.test.ts`): four integration
+tests cover stale completion and renewal under both different and identical
+worker IDs, using separate connections for the old and new lifetimes.
+They use actual claims, PostgreSQL-confirmed expiry, recovery, and reclaim;
+they do not fabricate a new owner/version with a fixture UPDATE. Each proves
+`0 -> claim 1 -> recovery 1 -> claim 2 -> terminal 2`. A full-row comparison
+around rejection preserves microsecond timestamps and checks status, owner,
+version, deadline, result, payload, priority, availability and other stored
+columns. V2 is live before and after rejection and can itself renew and
+complete, ruling out a test that merely rejects all writers.
+Removing only the completion version guard makes the same-ID completion
+test fail because the stale write succeeds. Removing only the renewal
+version guard makes the same-ID renewal test fail with `renewed: true`.
+Both guards were restored afterward.
+
+**Process evidence** (`npm run demo:fencing`): direct `node --import tsx`
+children run the existing coordinator and ordinary workers at production
+timings. A starts first; after its executor-start log, the parent sends
+SIGSTOP to the PID logged by A and verifies the OS reports it stopped. A
+lock-only NOWAIT probe fails promptly if the pause caught a retained step
+transaction. Samples show RUNNING v1 before expiry, an unchanged post-stop
+heartbeat baseline, PostgreSQL-confirmed expiry, then coordinator recovery
+to READY v1. B starts after that sample, claims v2 and completes the same
+12-second deterministic task. Its heartbeat advances while A stays stopped.
+SIGCONT resumes the same A process and its original pending execution; the
+demo requires A's explicit v1 completion rejection, forbids a v1 success
+log, and compares the entire terminal row against a snapshot taken before resuming A.
+It checks again after child shutdown and exits nonzero on failure.
+
+This demo uses different worker IDs and resumes A after v2 is terminal:
+status and worker identity also reject its write. The same-ID database
+tests with a live RUNNING v2 isolate the version predicate itself. Polling
+shows sampled states, not the exact recovery instant. Task state and database
+time are sampled together, and any sampled handover before the original
+deadline fails the demo. The demo refuses unrelated non-terminal work and
+cleans up its child processes, including a stopped A on failure.
+
+Fencing protects these controlled durable writes. It does not provide
+exactly-once execution or exactly-once side effects, prevent stale code from
+continuing to execute, physically kill stale workers, or protect external
+side effects. There is no new lifecycle state, durable event history,
+retry policy, or idempotency mechanism. Terminal rows preserve the generation
+and result, but do not retain worker attribution or the intermediate history.
 
 ### Retries
 

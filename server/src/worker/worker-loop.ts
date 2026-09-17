@@ -199,7 +199,11 @@ export async function runWorkerLoop<TSchema extends Record<string, unknown>>(
 
     let execution: { ok: true; output: Record<string, unknown> } | { ok: false; error: unknown };
     try {
-      execution = { ok: true, output: await executeStep(step) };
+      const pendingExecution = executeStep(step);
+      // Emitted after invoking the executor: the fencing demo can pause
+      // this process with its original delay already underway.
+      log(`[${workerId}] execution started for step ${step.id} at lease_version ${step.leaseVersion}`);
+      execution = { ok: true, output: await pendingExecution };
     } catch (error) {
       execution = { ok: false, error };
     }

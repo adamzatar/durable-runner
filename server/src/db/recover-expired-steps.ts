@@ -30,9 +30,11 @@ type RecoveredRow = {
  * particular step. Only the lease deadline carries authority.
  *
  * Expiry does not mean the old owner is dead. It may be frozen, paused, or
- * partitioned from PostgreSQL and resume later. Recovery only removes its
- * authority; the owner's own later renewal or completion is rejected by
- * the same deadline (renew-step-lease.ts, complete-step.ts).
+ * partitioned from PostgreSQL and resume later. The deadline already ends
+ * its authority before recovery; recovery clears ownership and makes the
+ * step claimable. After reclaim, the old version rejects stale renewal or
+ * completion even if the worker ID is reused and the new deadline is live
+ * (renew-step-lease.ts, complete-step.ts).
  *
  * Effects on a recovered row: status READY, current_worker_id and
  * lease_expires_at cleared. lease_version is NOT changed — recovery ends a

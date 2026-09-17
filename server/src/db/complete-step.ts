@@ -38,8 +38,8 @@ export interface CompleteStepSuccessParams {
  *   write affects zero rows instead of overwriting the new owner. That is
  *   the fencing check. It stops a stale writer from recording completion,
  *   not from having already performed a side effect (idempotency's job,
- *   not built yet). The full stale-owner-after-reclaim scenario is not
- *   exercised yet (Milestone 6).
+ *   not built yet). Milestone 6 exercises the full expiry/recovery/reclaim
+ *   sequence, including worker-ID reuse, in fencing.test.ts.
  * - Lease authority: lease_expires_at > clock_timestamp(). Once the
  *   database clock reaches the deadline, this generation can no longer
  *   complete, whether or not the recovery sweep has run. The deadline,
@@ -51,8 +51,8 @@ export interface CompleteStepSuccessParams {
  *
  * The two parts are not redundant. After a reclaim, lease_expires_at is
  * the NEW owner's live deadline, so the time check alone would pass for a
- * stale owner; only the generation check rejects it. And before any
- * recovery, the generation check alone would pass for an owner whose
+ * stale owner. With a reused worker ID, only the version check rejects it.
+ * Before any recovery, the generation check alone would pass for an owner whose
  * lease has expired; only the time check rejects it.
  *
  * Same transaction shape as renewStepLease, for the same reason (see the

@@ -140,7 +140,8 @@ commit a deadline that is already expired. A completed row fails the
 
 - The deadline check does not replace fencing. After a reclaim,
   `lease_expires_at` is the new owner's live deadline, so a stale owner
-  passes the time check; only `lease_version` rejects it. Before any
+  passes the time check. If the worker ID is reused, only `lease_version`
+  rejects it. Before any
   recovery, a lapsed owner passes the generation check; only the time check
   rejects it. Both are needed.
 - A worker cannot tell from a rejected completion *why* it was rejected
