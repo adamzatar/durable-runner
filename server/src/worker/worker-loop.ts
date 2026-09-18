@@ -3,7 +3,8 @@ import { abortableSleep } from "../abortable-sleep.js";
 import { STEP_LEASE_DURATION_MS, claimNextStep } from "../db/claim-step.js";
 import { CompletionConsistencyError, completeStepSuccess } from "../db/complete-step.js";
 import { renewStepLease } from "../db/renew-step-lease.js";
-import { executeStep } from "./execute-step.js";
+import { recordStepFailure } from "../db/record-step-failure.js";
+import { executeStep, InvalidTaskError } from "./execute-step.js";
 
 // Fixed-interval polling, no LISTEN/NOTIFY. Small enough to feel responsive
 // in a demo, large enough that an idle worker isn't hammering Postgres in a
@@ -133,7 +134,7 @@ function startLeaseRenewal<TSchema extends Record<string, unknown>>(
  *   2. start renewing that generation
  *   3. execute
  *   4. stop renewing, waiting out any in-flight renewal write
- *   5. attempt guarded completion, unless the executor threw
+ *   5. attempt guarded completion or failure reporting
  *
  * The worker never decides from its own clock whether it still owns the
  * step. Step 5 is attempted even if a renewal was rejected along the way;
@@ -147,14 +148,13 @@ function startLeaseRenewal<TSchema extends Record<string, unknown>>(
  * being renewed while it does, since renewal is not tied to `signal`.
  *
  * Failure cases, all logged with the loop moving on to the next iteration.
- * None of them retries, backs off, resets the step, or changes
- * lease_version from this worker:
+ * None of them changes lease_version or compensates for lost ownership:
  *
- * - executeStep throws: renewal stops, no completion write is made. The
- *   step stays RUNNING under this worker until its lease expires, then the
- *   recovery sweep returns it to READY and it can run again. With no
- *   attempt budget yet, a step whose executor always throws will cycle
- *   like this indefinitely.
+ * - executeStep throws: renewal stops and drains before recordStepFailure.
+ *   With a live lease, a valid task's runtime failure schedules RETRY_WAIT
+ *   while budget remains; exhausted budget or invalid input dead-letters.
+ *   A rejected failure report writes nothing. A database error leaves an
+ *   unknown outcome; the worker never resets the row to compensate.
  * - completeStepSuccess throws CompletionConsistencyError: the UPDATE
  *   matched zero rows and made no mutation. This worker's lease on that
  *   generation had expired, or the step had already been recovered (and
@@ -185,7 +185,7 @@ export async function runWorkerLoop<TSchema extends Record<string, unknown>>(
     }
 
     const { step } = result;
-    log(`[${workerId}] claimed step ${step.id} (${step.taskType}) at lease_version ${step.leaseVersion}`);
+    log(`[${workerId}] claimed step ${step.id} (${step.taskType}) at lease_version ${step.leaseVersion} (attempt ${step.attemptCount})`);
 
     const renewal = startLeaseRenewal(db, {
       stepId: step.id,
@@ -215,11 +215,23 @@ export async function runWorkerLoop<TSchema extends Record<string, unknown>>(
     await renewal.stop();
 
     if (!execution.ok) {
-      logError(
-        `[${workerId}] step ${step.id} execution failed; renewal stopped, no completion attempted ` +
-          `(step stays RUNNING until its lease expires and recovery returns it to READY)`,
-        execution.error,
-      );
+      const errorText = execution.error instanceof Error ? execution.error.message : String(execution.error);
+      logError(`[${workerId}] step ${step.id} execution failed on attempt ${step.attemptCount}; renewal stopped`, execution.error);
+      try {
+        const failure = await recordStepFailure(db, {
+          id: step.id, workerId, leaseVersion: step.leaseVersion,
+          error: errorText, retryable: !(execution.error instanceof InvalidTaskError),
+        });
+        if (!failure.recorded) {
+          log(`[${workerId}] step ${step.id} failure rejected at lease_version ${step.leaseVersion}; no mutation made`);
+        } else {
+          log(`[${workerId}] step ${step.id} failure recorded -> ${failure.status} ` +
+            `at attempt_count ${failure.attemptCount}, lease_version ${failure.leaseVersion}` +
+            (failure.status === "RETRY_WAIT" ? `; available_at ${failure.availableAt}` : ""));
+        }
+      } catch (error) {
+        logError(`[${workerId}] step ${step.id} failure write failed; outcome unknown to this worker`, error);
+      }
       continue;
     }
 

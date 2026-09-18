@@ -67,7 +67,7 @@ async function reclaim(newWorkerId: string) {
     await sleep(10);
   }
 
-  expect(await recoverExpiredSteps(drizzle(admin))).toEqual([{ id: fixtureId, leaseVersion: 1 }]);
+  expect(await recoverExpiredSteps(drizzle(admin))).toEqual([{ id: fixtureId, leaseVersion: 1, status: "READY" }]);
   expect(await readRow()).toMatchObject({
     status: "READY", current_worker_id: null, lease_expires_at: null, lease_version: 1,
   });

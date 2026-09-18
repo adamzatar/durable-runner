@@ -34,7 +34,7 @@ export const steps = pgTable(
     // ordering.
     priority: integer("priority").notNull().default(0),
     // "Not eligible to be claimed before this instant." Doubles as the
-    // retry-backoff deadline later, so eligibility and retry scheduling
+    // retry-backoff deadline, so eligibility and retry scheduling
     // share one mechanism instead of two.
     availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
     // Nullable: a step that no worker owns has no owner recorded. Plain
@@ -47,6 +47,11 @@ export const steps = pgTable(
     // Ownership generation. 0 means "never claimed"; every successful
     // READY -> RUNNING claim increments it. See claim-step.ts.
     leaseVersion: integer("lease_version").notNull().default(0),
+    // Claims consume attempts, including a crash between claim and execution.
+    // Separate from fencing generations; neither failure nor promotion increments it.
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    lastError: text("last_error"),
     // The authority boundary for the current ownership generation, always
     // written from the database clock: set by the claim, pushed forward by
     // renewStepLease, cleared by completion and by recovery. Once the
@@ -74,6 +79,8 @@ export const steps = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   () => [
+    check("steps_attempt_count_nonnegative", sql`attempt_count >= 0`),
+    check("steps_max_attempts_positive", sql`max_attempts >= 1`),
     // Key columns and their directions match the claim query's ORDER BY
     // exactly, and the partial predicate matches its status filter, so
     // the planner can walk claimable candidates in claim order. Partial

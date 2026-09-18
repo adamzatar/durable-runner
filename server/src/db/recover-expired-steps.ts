@@ -7,15 +7,18 @@ export interface RecoveredStep {
   // The generation whose lease expired. Preserved on the row, so the next
   // claim produces leaseVersion + 1.
   leaseVersion: number;
+  status: "READY" | "DEAD_LETTERED";
 }
 
 type RecoveredRow = {
   id: string;
   lease_version: number;
+  status: "READY" | "DEAD_LETTERED";
 };
 
 /**
- * Returns up to 100 unlocked, expired RUNNING steps to READY per sweep.
+ * Resolves up to 100 unlocked, expired RUNNING steps per sweep: READY if
+ * attempt budget remains, DEAD_LETTERED if the final claimed attempt expired.
  *
  * This is the only code path that performs RUNNING -> READY. The lifecycle
  * table allows that edge's shape; this statement's WHERE clause is what
@@ -32,14 +35,15 @@ type RecoveredRow = {
  * Expiry does not mean the old owner is dead. It may be frozen, paused, or
  * partitioned from PostgreSQL and resume later. The deadline already ends
  * its authority before recovery; recovery clears ownership and makes the
- * step claimable. After reclaim, the old version rejects stale renewal or
+ * step claimable while budget remains. After reclaim, the old version rejects stale renewal or
  * completion even if the worker ID is reused and the new deadline is live
  * (renew-step-lease.ts, complete-step.ts).
  *
- * Effects on a recovered row: status READY, current_worker_id and
- * lease_expires_at cleared. lease_version is NOT changed — recovery ends a
+ * Effects on a recovered row: status READY or DEAD_LETTERED, owner and
+ * lease_expires_at cleared. Neither counter changes — recovery ends a
  * generation, it does not create one; the next successful claim
- * increments it. Payload and result are untouched.
+ * increments it. Payload, result and last_error are untouched: expiry is
+ * evidence of lost authority, not an observed executor exception.
  *
  * One statement: the candidate SELECT locks expired rows with FOR UPDATE
  * SKIP LOCKED, and the UPDATE changes only those locked candidates. The
@@ -73,6 +77,7 @@ export async function recoverExpiredSteps<TSchema extends Record<string, unknown
   // clause hardcodes status = 'RUNNING', so this confirms RUNNING -> READY
   // is a legal lifecycle edge before any row is written.
   transitionStepStatus("RUNNING", "READY");
+  transitionStepStatus("RUNNING", "DEAD_LETTERED");
 
   const recovered = await db.execute<RecoveredRow>(sql`
     with expired as (
@@ -85,14 +90,15 @@ export async function recoverExpiredSteps<TSchema extends Record<string, unknown
       for update skip locked
     )
     update steps
-    set status = 'READY',
+    set status = case when attempt_count < max_attempts
+                      then 'READY'::step_status else 'DEAD_LETTERED'::step_status end,
         current_worker_id = null,
         lease_expires_at = null,
         updated_at = now()
     from expired
     where steps.id = expired.id
-    returning steps.id, steps.lease_version
+    returning steps.id, steps.lease_version, steps.status
   `);
 
-  return recovered.rows.map((row) => ({ id: row.id, leaseVersion: row.lease_version }));
+  return recovered.rows.map((row) => ({ id: row.id, leaseVersion: row.lease_version, status: row.status }));
 }

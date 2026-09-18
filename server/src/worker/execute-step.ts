@@ -1,6 +1,15 @@
 import { createHash } from "node:crypto";
 import { parseTaskType } from "../domain/task-type.js";
 
+// One distinction: unchanged invalid input cannot improve on a retry.
+// Ordinary exceptions from a validated task remain retryable.
+export class InvalidTaskError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidTaskError";
+  }
+}
+
 // Upper bound on delayMs. Exists so a bad or hostile payload can't make a
 // worker sit on one step indefinitely. Raised from 5s to 60s in Milestone
 // 5: a step is now allowed to outlast STEP_LEASE_DURATION_MS (30s) because
@@ -27,21 +36,17 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Explicit shape validation rather than a schema library: one task type,
-// two fields, not worth a dependency. Throws loudly on anything that
-// doesn't match — an invalid persisted payload is a bug (bad insert, bad
-// migration of old data), not something to route through retry logic that
-// doesn't exist yet.
+// Explicit validation keeps invalid input separate from runtime failure.
 function parseHashAfterDelayPayload(payload: unknown): HashAfterDelayPayload {
   if (typeof payload !== "object" || payload === null) {
-    throw new Error(`hash_after_delay payload must be an object, got ${JSON.stringify(payload)}`);
+    throw new InvalidTaskError(`hash_after_delay payload must be an object, got ${JSON.stringify(payload)}`);
   }
   const { input, delayMs } = payload as Record<string, unknown>;
   if (typeof input !== "string" || input.length === 0) {
-    throw new Error(`hash_after_delay payload.input must be a non-empty string, got ${JSON.stringify(input)}`);
+    throw new InvalidTaskError(`hash_after_delay payload.input must be a non-empty string, got ${JSON.stringify(input)}`);
   }
   if (typeof delayMs !== "number" || !Number.isInteger(delayMs) || delayMs < 0 || delayMs > MAX_TASK_DELAY_MS) {
-    throw new Error(
+    throw new InvalidTaskError(
       `hash_after_delay payload.delayMs must be an integer in [0, ${MAX_TASK_DELAY_MS}], got ${JSON.stringify(delayMs)}`,
     );
   }
@@ -54,13 +59,38 @@ async function runHashAfterDelay(payload: unknown): Promise<HashAfterDelayResult
   return { hash: createHash("sha256").update(input).digest("hex") };
 }
 
-// One switch over the one supported task type. Not a registry/plugin
-// architecture — there is exactly one case, and adding a second is meant
-// to mean adding a second case here, not registering a new module.
-export async function executeStep(step: { taskType: string; payload: unknown }): Promise<Record<string, unknown>> {
-  const taskType = parseTaskType(step.taskType);
+function failThenHash(payload: unknown, attemptCount: number): HashAfterDelayResult {
+  if (typeof payload !== "object" || payload === null) {
+    throw new InvalidTaskError("fail_then_hash payload must be an object");
+  }
+  const { input, failuresBeforeSuccess } = payload as Record<string, unknown>;
+  if (typeof input !== "string" || input.length === 0) {
+    throw new InvalidTaskError("fail_then_hash payload.input must be a non-empty string");
+  }
+  if (typeof failuresBeforeSuccess !== "number" || !Number.isSafeInteger(failuresBeforeSuccess) || failuresBeforeSuccess < 0) {
+    throw new InvalidTaskError("fail_then_hash payload.failuresBeforeSuccess must be a nonnegative safe integer");
+  }
+  if (attemptCount <= failuresBeforeSuccess) {
+    throw new Error(`fail_then_hash deterministic failure on attempt ${attemptCount}`);
+  }
+  return { hash: createHash("sha256").update(input).digest("hex") };
+}
+
+// Durable attempt input comes from the claim, never a process-local counter.
+export async function executeStep(step: { taskType: string; payload: unknown; attemptCount: number }): Promise<Record<string, unknown>> {
+  let taskType;
+  try {
+    taskType = parseTaskType(step.taskType);
+  } catch (error) {
+    throw new InvalidTaskError(error instanceof Error ? error.message : String(error));
+  }
+  if (!Number.isInteger(step.attemptCount) || step.attemptCount < 1) {
+    throw new InvalidTaskError("execution requires a positive claimed attemptCount");
+  }
   switch (taskType) {
     case "hash_after_delay":
       return runHashAfterDelay(step.payload);
+    case "fail_then_hash":
+      return failThenHash(step.payload, step.attemptCount);
   }
 }

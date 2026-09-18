@@ -88,7 +88,7 @@ describe("recoverExpiredSteps", () => {
 
     const recovered = await recoverExpiredSteps(sweeper);
 
-    expect(recovered).toEqual([{ id, leaseVersion: 3 }]);
+    expect(recovered).toEqual([{ id, leaseVersion: 3, status: "READY" }]);
     const after = await snapshot(id);
     expect(after.status).toBe("READY");
     expect(after.current_worker_id).toBeNull();
@@ -170,7 +170,7 @@ describe("recoverExpiredSteps", () => {
       expect(stillA.status).toBe("RUNNING");
       expect(stillA.current_worker_id).toBe("worker-A");
 
-      expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: 1 }]);
+      expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: 1, status: "READY" }]);
       const recovered = await snapshot(id);
       expect(recovered.status).toBe("READY");
       expect(recovered.lease_version).toBe(1);
@@ -209,7 +209,7 @@ describe("recoverExpiredSteps", () => {
       await locker.query("begin");
       expect((await locker.query("select id from steps where id = $1 for update", [x])).rowCount).toBe(1);
 
-      expect(await recoverExpiredSteps(drizzle(recoveryClient))).toEqual([{ id: y, leaseVersion: 7 }]);
+      expect(await recoverExpiredSteps(drizzle(recoveryClient))).toEqual([{ id: y, leaseVersion: 7, status: "READY" }]);
       expect(await snapshot(x)).toEqual(beforeX);
       expect(await snapshot(y)).toMatchObject({
         status: "READY", current_worker_id: null, lease_expires_at: null,
@@ -217,7 +217,7 @@ describe("recoverExpiredSteps", () => {
       });
 
       await locker.query("commit");
-      expect(await recoverExpiredSteps(drizzle(recoveryClient))).toEqual([{ id: x, leaseVersion: 3 }]);
+      expect(await recoverExpiredSteps(drizzle(recoveryClient))).toEqual([{ id: x, leaseVersion: 3, status: "READY" }]);
       expect(await snapshot(x)).toMatchObject({
         status: "READY", current_worker_id: null, lease_expires_at: null,
         lease_version: 3, payload: beforeX.payload, result: beforeX.result,
@@ -247,7 +247,7 @@ describe("recoverExpiredSteps", () => {
     expect(first.every((step) => step.leaseVersion === 4)).toBe(true);
     expect((await snapshot(ids[100]!)).status).toBe("RUNNING");
 
-    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id: ids[100]!, leaseVersion: 4 }]);
+    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id: ids[100]!, leaseVersion: 4, status: "READY" }]);
     expect(await recoverExpiredSteps(sweeper)).toEqual([]);
   });
 

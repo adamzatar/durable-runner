@@ -182,3 +182,24 @@ not a routine setup log.
   found no changes; migration, typecheck, build, and diff whitespace checks
   passed. The demo does not establish an exact recovery instant, and none
   of this protects external effects or provides exactly-once execution.
+
+## 2026-09-17 — Milestone 7 total-budget edge
+
+- Counting attempts at claim exposed a conflict with unconditional expiry
+  recovery: a crash on the final allowed attempt would return an exhausted
+  row to READY. Allowing another claim violates the total budget; refusing
+  it alone strands that row. The total-cap policy now dead-letters expired
+  exhausted rows and guards claims by remaining budget (ADR 0002). It does
+  not turn expiry into an invented executor exception; last_error is preserved.
+- The new crash regression exercises three actual claims, database-confirmed
+  expiries, and recovery passes. Restoring unconditional READY recovery made
+  it fail at the third expiry. Removing the claim-budget guards separately
+  produced an actual fourth claim (`attemptCount: 4`) and failed the exhausted
+  READY test. Both mutations were restored. The reported-failure off-by-one
+  mutation (`<=` instead of `<`) also incorrectly scheduled another retry at
+  attempt three and was detected.
+- Existing development data had one terminal row at generation 2, with no
+  durable attempt history. The additive migration initializes its attempt
+  count to zero rather than pretending generation 2 proves two executions.
+  New claims count attempts from migration onward; ownership generations
+  retain their existing meaning.

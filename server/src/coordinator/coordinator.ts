@@ -3,8 +3,8 @@ import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { RECOVERY_SWEEP_INTERVAL_MS, runRecoveryLoop } from "./recovery-loop.js";
 
-// Coordinator process entrypoint. Its only responsibility so far is the
-// lease-expiry recovery sweep. It is a separate local process rather than
+// Coordinator process entrypoint: lease-expiry recovery and due retry
+// promotion. It is a separate local process rather than
 // a loop inside the Fastify server so that it can be started, stopped, or
 // killed independently of the API and the workers — a dead coordinator
 // delays recovery, it does not change who holds authority over a step.

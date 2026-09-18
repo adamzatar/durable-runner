@@ -34,6 +34,7 @@ interface LogicalWorker {
 function startLogicalWorker(
   workerId: string,
   options: Pick<WorkerLoopOptions, "leaseDurationMs" | "leaseRenewalIntervalMs"> = {},
+  onLog?: (message: string) => void,
 ): LogicalWorker {
   const pool = new Pool({ connectionString, max: 1 });
   const db = drizzle(pool);
@@ -44,7 +45,7 @@ function startLogicalWorker(
     ...options,
     signal: controller.signal,
     pollIntervalMs: 50,
-    log: (message) => logs.push(message),
+    log: (message) => { logs.push(message); onLog?.(message); },
     logError: (message, error) => errors.push({ message, error }),
   });
   return { pool, db, controller, loopPromise, logs, errors };
@@ -232,43 +233,73 @@ describe("runWorkerLoop", () => {
     expect(worker.errors).toEqual([]);
   }, 15_000);
 
-  it("stops renewing when the executor throws, leaving the step RUNNING until its lease expires and recovery returns it", async () => {
-    // Invalid payload: the executor throws. No retry exists yet.
+  it("dead-letters malformed input immediately through the guarded failure path", async () => {
     const id = randomUUID();
     await admin.query(
-      `insert into steps (id, status, priority, task_type, payload)
-       values ($1, 'READY', 0, 'hash_after_delay', '{"input":"","delayMs":0}'::jsonb)`,
-      [id],
+      `insert into steps (id, status, task_type, payload)
+       values ($1, 'READY', 'hash_after_delay', '{"input":"","delayMs":0}'::jsonb)`, [id],
     );
-    const worker = startLogicalWorker("loop-worker-throws", { leaseDurationMs: 400, leaseRenewalIntervalMs: 50 });
-
+    const worker = startLogicalWorker("loop-worker-invalid");
     try {
-      await waitUntil(async () => worker.errors.some((entry) => entry.message.includes("execution failed")), 5_000);
-      const atFailure = await leaseState(id);
-      expect(atFailure.status).toBe("RUNNING");
-
-      // Well past expiry and many renewal intervals later, the deadline has
-      // not moved: nothing is renewing a step whose executor failed.
-      await waitUntil(async () => (await leaseState(id)).expired === true, 5_000);
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      const later = await leaseState(id);
-      expect(later.status).toBe("RUNNING");
-      expect(later.lease_expires_at).toBe(atFailure.lease_expires_at);
-      expect(later.lease_version).toBe(1);
-      expect(
-        worker.errors.some(
-          (entry) => entry.message.includes("completion rejected") || entry.message.includes("completion write failed"),
-        ),
-      ).toBe(false);
+      await waitUntil(async () => (await leaseState(id)).status === "DEAD_LETTERED", 5_000);
+      const state = await admin.query(
+        `select attempt_count, lease_version, current_worker_id, lease_expires_at, last_error,
+                clock_timestamp() < created_at + interval '30 seconds' as before_original_lease_deadline
+         from steps where id = $1`, [id],
+      );
+      expect(state.rows[0]).toMatchObject({ attempt_count: 1, lease_version: 1, current_worker_id: null,
+        lease_expires_at: null, before_original_lease_deadline: true });
+      expect(state.rows[0].last_error).toMatch(/input/);
+      expect(worker.logs.filter((line) => line.includes(`claimed step ${id}`))).toHaveLength(1);
     } finally {
-      // Stopped before recovery, so it does not immediately pick the step
-      // back up and fail again.
       await stopLogicalWorker(worker);
     }
+    expect(await recoverExpiredSteps(drizzle(admin))).toEqual([]);
+  });
 
-    expect(await recoverExpiredSteps(drizzle(admin))).toEqual([{ id, leaseVersion: 1 }]);
-    expect((await leaseState(id)).status).toBe("READY");
-  }, 15_000);
+  it("reports a valid task's runtime failure as RETRY_WAIT without waiting for expiry", async () => {
+    const id = randomUUID();
+    await admin.query(
+      `insert into steps (id, status, task_type, payload)
+       values ($1, 'READY', 'fail_then_hash', '{"input":"runtime-failure","failuresBeforeSuccess":2}')`, [id],
+    );
+    const worker = startLogicalWorker("loop-worker-retry");
+    try {
+      await waitUntil(async () => (await leaseState(id)).status === "RETRY_WAIT", 5_000);
+      const state = await admin.query(
+        `select attempt_count, lease_version, current_worker_id, lease_expires_at, last_error,
+                clock_timestamp() < created_at + interval '30 seconds' as before_original_lease_deadline
+         from steps where id = $1`, [id],
+      );
+      expect(state.rows[0]).toMatchObject({ attempt_count: 1, lease_version: 1, current_worker_id: null,
+        lease_expires_at: null, before_original_lease_deadline: true });
+      expect(state.rows[0].last_error).toMatch(/deterministic failure on attempt 1/);
+    } finally {
+      await stopLogicalWorker(worker);
+    }
+  });
+
+  it("a worker whose lease expires before reporting runtime failure logs rejection without compensation", async () => {
+    const id = randomUUID();
+    await admin.query(
+      `insert into steps (id, status, task_type, payload)
+       values ($1, 'READY', 'fail_then_hash', '{"input":"lost-failure","failuresBeforeSuccess":2}')`, [id],
+    );
+    const worker = startLogicalWorker("loop-worker-lost-failure", { leaseDurationMs: 100, leaseRenewalIntervalMs: 50 },
+      (message) => { if (message.includes("execution started")) blockEventLoop(250); });
+    try {
+      await waitUntil(async () => worker.logs.some((line) => line.includes("failure rejected")), 5_000);
+      const result = await admin.query(
+        `select status, current_worker_id, attempt_count, lease_version, last_error, result,
+                lease_expires_at <= clock_timestamp() as expired from steps where id = $1`, [id],
+      );
+      expect(result.rows[0]).toEqual({ status: "RUNNING", current_worker_id: "loop-worker-lost-failure",
+        attempt_count: 1, lease_version: 1, last_error: null, result: null, expired: true });
+      expect(worker.logs.filter((line) => line.includes(`claimed step ${id}`))).toHaveLength(1);
+    } finally {
+      await stopLogicalWorker(worker);
+    }
+  });
 
   it("loses the lease when the event loop is blocked past the deadline: completion is rejected, and after recovery the step runs again at the next lease_version", async () => {
     // Lease 500ms, renewal every 50ms, step takes 1800ms. Partway in, the
@@ -300,7 +331,7 @@ describe("runWorkerLoop", () => {
       // Recovery, then the same worker loop claims it again as a new
       // generation and this time completes. The work executed twice; its
       // completion was recorded once.
-      expect(await recoverExpiredSteps(drizzle(admin))).toEqual([{ id, leaseVersion: 1 }]);
+      expect(await recoverExpiredSteps(drizzle(admin))).toEqual([{ id, leaseVersion: 1, status: "READY" }]);
       await waitUntil(async () => (await leaseState(id)).status === "SUCCEEDED", 10_000);
       const final = await leaseState(id);
       expect(final.lease_version).toBe(2);

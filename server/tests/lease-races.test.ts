@@ -203,7 +203,7 @@ describe("renewal vs recovery", () => {
       expect(renewal).toEqual({ renewed: false });
       // The first sweep may skip the rejecting renewal's row lock. Once
       // both operations finish, the next sweep must recover any skipped row.
-      expect([...recovered, ...(await recoverExpiredSteps(sweeper))]).toEqual([{ id, leaseVersion: VERSION }]);
+      expect([...recovered, ...(await recoverExpiredSteps(sweeper))]).toEqual([{ id, leaseVersion: VERSION, status: "READY" }]);
       const row = await readRow(id);
       expect(row.status).toBe("READY");
       expect(row.current_worker_id).toBeNull();
@@ -242,7 +242,7 @@ describe("renewal vs recovery", () => {
     const row = await readRow(id);
     expect(row.status).toBe("RUNNING");
     expect(row.expired).toBe(true);
-    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: VERSION }]);
+    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: VERSION, status: "READY" }]);
   });
 
   it("a renewal that starts while the lease is live but waits behind a LOCK-ONLY holder (SELECT ... FOR UPDATE) past the deadline is rejected", async () => {
@@ -263,7 +263,7 @@ describe("renewal vs recovery", () => {
     expect(row.lease_version).toBe(VERSION);
     expect(row.lease_expires_at).toBe(deadlineBefore);
     expect(row.expired).toBe(true);
-    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: VERSION }]);
+    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: VERSION, status: "READY" }]);
   });
 
   it("control: a renewal held behind a lock-only holder that is released while the lease is still live succeeds", async () => {
@@ -299,7 +299,7 @@ describe("recovery behind row locks", () => {
       expect((await readRow(id)).status).toBe("RUNNING");
       await locker.query("commit");
 
-      expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: VERSION }]);
+      expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: VERSION, status: "READY" }]);
       expect((await readRow(id)).status).toBe("READY");
     } finally {
       await locker.query("rollback").catch(() => undefined);
@@ -359,11 +359,11 @@ describe("completion vs recovery", () => {
     const unswept = await readRow(first);
     expect(unswept.status).toBe("RUNNING");
     expect(unswept.result).toBeNull();
-    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id: first, leaseVersion: VERSION }]);
+    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id: first, leaseVersion: VERSION, status: "READY" }]);
 
     // After recovery.
     const second = await insertRunning(-1);
-    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id: second, leaseVersion: VERSION }]);
+    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id: second, leaseVersion: VERSION, status: "READY" }]);
     expect(await tryComplete(owner, second, { hash: "late" })).toBe(false);
     expect((await readRow(second)).status).toBe("READY");
 
@@ -378,7 +378,7 @@ describe("completion vs recovery", () => {
 
       expect(completed).toBe(false);
       // Recovery may skip the rejecting completion's lock on this sweep.
-      expect([...recovered, ...(await recoverExpiredSteps(sweeper))]).toEqual([{ id, leaseVersion: VERSION }]);
+      expect([...recovered, ...(await recoverExpiredSteps(sweeper))]).toEqual([{ id, leaseVersion: VERSION, status: "READY" }]);
       const row = await readRow(id);
       expect(row.status).toBe("READY");
       expect(row.result).toBeNull();
@@ -436,7 +436,7 @@ describe("completion vs recovery", () => {
     expect(row.lease_version).toBe(VERSION);
     expect(row.result).toBeNull();
     expect(row.expired).toBe(true);
-    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: VERSION }]);
+    expect(await recoverExpiredSteps(sweeper)).toEqual([{ id, leaseVersion: VERSION, status: "READY" }]);
     expect((await readRow(id)).result).toBeNull();
   });
 

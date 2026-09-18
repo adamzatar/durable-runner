@@ -189,7 +189,7 @@ describe("renewStepLease", () => {
     // deadline did not move, so it is still expired and still recoverable.
     expect(await snapshot(id)).toEqual(before);
     expect(before.status).toBe("RUNNING");
-    expect(await recoverExpiredSteps(db)).toEqual([{ id, leaseVersion: step.leaseVersion }]);
+    expect(await recoverExpiredSteps(db)).toEqual([{ id, leaseVersion: step.leaseVersion, status: "READY" }]);
   });
 
   it("with a real short claim-produced lease: renewable while live, not once the database clock passes it", async () => {

@@ -1,6 +1,7 @@
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { abortableSleep } from "../abortable-sleep.js";
 import { recoverExpiredSteps } from "../db/recover-expired-steps.js";
+import { promoteDueRetries } from "../db/promote-due-retries.js";
 
 // How often the coordinator looks for expired leases. This affects
 // liveness only — how long an expired step sits RUNNING before it is
@@ -45,11 +46,22 @@ export async function runRecoveryLoop<TSchema extends Record<string, unknown>>(
       for (const step of recovered) {
         log(
           `[coordinator] lease expired on step ${step.id} at lease_version ${step.leaseVersion}; ` +
-            `RUNNING -> READY (previous owner may still be running)`,
+            `RUNNING -> ${step.status} ` +
+            (step.status === "DEAD_LETTERED" ? "(attempt budget exhausted)" : "(previous owner may still be running)"),
         );
       }
     } catch (error) {
       logError("[coordinator] recovery sweep failed; will retry", error);
+    }
+    // Separate statements and error handling: a failed recovery sweep must
+    // not prevent due retries from becoming claimable (or vice versa).
+    try {
+      const promoted = await promoteDueRetries(db);
+      for (const step of promoted) {
+        log(`[coordinator] step ${step.id} RETRY_WAIT -> READY at attempt_count ${step.attemptCount}, lease_version ${step.leaseVersion}`);
+      }
+    } catch (error) {
+      logError("[coordinator] retry promotion failed; will retry", error);
     }
     await abortableSleep(intervalMs, signal);
   }

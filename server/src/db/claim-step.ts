@@ -21,6 +21,9 @@ export interface ClaimedStep {
   // The ownership generation this claim produced. Renewal and completion
   // both condition on still holding this exact version.
   leaseVersion: number;
+  // Successful claims consume attempts, even if the process crashes before
+  // entering the executor. Failure/promotion/recovery never increment this.
+  attemptCount: number;
   // Informational only. The worker never compares this against its own
   // clock to decide whether it still owns the step; the database decides
   // that on every renewal/completion write.
@@ -63,6 +66,7 @@ type ClaimedRow = {
   status: string;
   current_worker_id: string;
   lease_version: number;
+  attempt_count: number;
   lease_expires_at: Date;
   priority: number;
   available_at: Date;
@@ -139,6 +143,7 @@ export async function claimNextStep<TSchema extends Record<string, unknown>>(
       from steps
       where status = 'READY'
         and available_at <= now()
+        and attempt_count < max_attempts
       order by priority desc, available_at asc, id asc
       limit 1
       for update skip locked
@@ -181,11 +186,13 @@ export async function claimNextStep<TSchema extends Record<string, unknown>>(
       set status = 'RUNNING',
           current_worker_id = ${workerId},
           lease_version = lease_version + 1,
+          attempt_count = attempt_count + 1,
           lease_expires_at = clock_timestamp() + (${leaseDurationMs}::int * interval '1 millisecond'),
           updated_at = now()
       where id = ${candidate.id}
         and status = 'READY'
-      returning id, status, current_worker_id, lease_version, lease_expires_at, priority, available_at, task_type, payload
+        and attempt_count < max_attempts
+      returning id, status, current_worker_id, lease_version, attempt_count, lease_expires_at, priority, available_at, task_type, payload
     `);
 
     if (claimed.rows.length !== 1) {
@@ -204,6 +211,7 @@ export async function claimNextStep<TSchema extends Record<string, unknown>>(
         status: "RUNNING",
         workerId: row.current_worker_id,
         leaseVersion: row.lease_version,
+        attemptCount: row.attempt_count,
         leaseExpiresAt: row.lease_expires_at,
         priority: row.priority,
         availableAt: row.available_at,

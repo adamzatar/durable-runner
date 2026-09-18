@@ -73,8 +73,8 @@ a cooperative mechanism, not yet built.
 Implemented in Milestone 3: the `steps` table and claiming
 (`server/src/db/claim-step.ts`). Worker loops followed in Milestone 4;
 heartbeats, lease renewal, expiry and recovery in Milestone 5; demonstrated
-stale-owner fencing after reclaim in Milestone 6 (see below). Retries are
-not implemented yet.
+stale-owner fencing after reclaim in Milestone 6; explicit reported-failure
+retries and dead-lettering in Milestone 7 (see below).
 
 - **Table.** `steps` holds `id` (random uuid), `status` (a PostgreSQL enum
   generated from `STEP_STATUSES`), `priority`, `available_at`,
@@ -204,7 +204,7 @@ claims this milestone makes.
     guarantee — a later milestone adding a `NOT NULL` column to a table
     that genuinely holds rows would need a default or a backfill step,
     and should not assume this precedent still applies.
-- **Executor.** One supported task, `hash_after_delay`: payload
+- **Executor.** Milestone 4 introduced `hash_after_delay`: payload
   `{ input: string, delayMs: number }`, waits `delayMs` (validated
   `0 <= delayMs <= 5000`, raised to `60000` in Milestone 5 so a step can
   outlast one 30s lease; the cap exists so a bad payload can't stall a
@@ -214,7 +214,8 @@ claims this milestone makes.
   library) — an invalid persisted payload throws rather than being
   silently coerced or retried. One `switch` in
   `server/src/worker/execute-step.ts`, not a registry: adding a task type
-  means adding a case, not registering a plugin.
+  means adding a case, not registering a plugin. Milestone 7 adds
+  `fail_then_hash` in that same switch.
 - **Completion.** In Milestone 4, `completeStepSuccess`
   (`server/src/db/complete-step.ts`) was one atomic
   `UPDATE ... WHERE id = $id AND status = 'RUNNING' AND
@@ -264,14 +265,13 @@ claims this milestone makes.
   steps at once. Shutdown is checked between iterations only — a signal
   abort stops a new claim from starting (or cuts an idle poll wait short)
   but never interrupts a step already claimed.
-  - **Unexpected errors.** Two distinct cases, both logged with the loop
-    continuing to the next iteration — no retry, no backoff, no reset to
-    `READY`, no lease-version change in either case:
+  - **Errors.** Two distinct cases, both logged with the loop continuing
+    to the next iteration, without changing the ownership generation:
     - If `executeStep` throws, this worker makes no completion write at
       all. In Milestone 4 nothing else could act on the step, so it stayed
-      `RUNNING` indefinitely. Since Milestone 5 the worker also stops
-      renewing, the lease expires, and recovery returns the step to
-      `READY`.
+      `RUNNING` indefinitely. Milestone 5 stopped renewal and relied on
+      lease recovery. Milestone 7 instead reports observed executor failure
+      through a live-owner-authorized retry/dead-letter transition.
     - If `completeStepSuccess` throws `CompletionConsistencyError`, the
       completion `UPDATE` matched zero rows and made no mutation — this
       worker's ownership-generation predicate was rejected. That does
@@ -320,8 +320,9 @@ step's lease while it executes, the lease deadline as the limit on an
 owner's renewal and completion writes, expired-lease recovery, a
 coordinator process running the recovery sweep, and a real child-process
 crash/recovery demo. Milestone 6 below adds the demonstration of a stale
-owner resuming after reclaim and attempting completion. Retries, attempt
-budgets, idempotency, verification, durable events, and UI remain unimplemented.
+owner resuming after reclaim and attempting completion. Milestone 7 below
+adds reported-failure retries and attempt budgets. Idempotency, verification,
+durable events, and UI remain unimplemented.
 
 - **Two facts, two jobs.**
   - A *heartbeat* (`workers.last_heartbeat_at`) means only "a process using
@@ -471,7 +472,8 @@ budgets, idempotency, verification, durable events, and UI remain unimplemented.
   delayed transaction can commit an already-expired deadline. A completed
   row fails the `RUNNING` predicate. The wall-clock assumption above applies.
 - **Recovery** (`server/src/db/recover-expired-steps.ts`). One statement,
-  preceded by the static `transitionStepStatus("RUNNING", "READY")` check:
+  preceded by static lifecycle checks. Milestone 7 adds the exhausted-budget
+  terminal branch; the expired-candidate locking is unchanged:
 
   ```sql
   WITH expired AS (
@@ -484,13 +486,14 @@ budgets, idempotency, verification, durable events, and UI remain unimplemented.
       FOR UPDATE SKIP LOCKED
   )
   UPDATE steps
-  SET status = 'READY',
+  SET status = CASE WHEN attempt_count < max_attempts
+                    THEN 'READY'::step_status ELSE 'DEAD_LETTERED'::step_status END,
       current_worker_id = NULL,
       lease_expires_at = NULL,
       updated_at = now()
   FROM expired
   WHERE steps.id = expired.id
-  RETURNING steps.id, steps.lease_version;
+  RETURNING steps.id, steps.lease_version, steps.status;
   ```
 
   The CTE selects and locks at most 100 expired candidates. The same
@@ -504,7 +507,8 @@ budgets, idempotency, verification, durable events, and UI remain unimplemented.
   - It reads only the step row and the database clock, never `workers`.
     A stale heartbeat does not make a live lease recoverable, and a fresh
     heartbeat does not protect an expired one (both tested).
-  - `lease_version` is preserved. Recovery ends a generation; the next
+  - Both counters and `last_error` are preserved. When budget remains,
+    recovery ends a generation; the next
     claim creates one (A claims v1 → expires → recovery leaves v1 → B
     claims v2).
   - `<= clock_timestamp()` is the exact complement of the owner-side
@@ -569,11 +573,9 @@ budgets, idempotency, verification, durable events, and UI remain unimplemented.
     logged and retried next tick.
   - Completion is still attempted after a rejected renewal; the database
     rejects it. The worker does not decide ownership from local state.
-  - If the executor throws: renewal stops, no completion write, the step
-    stays `RUNNING` until its lease expires, then recovery returns it to
-    `READY` and it can run again. With no attempt budget yet, a step whose
-    executor always throws cycles `RUNNING → READY` roughly every 30s
-    indefinitely.
+  - In Milestone 5, executor exceptions stopped renewal and relied on lease
+    recovery. Milestone 7 replaces that behavior with guarded failure
+    reporting after renewal stops and drains; no deliberate expiry wait.
   - The executor is never cancelled when a lease is lost (no cancellation
     mechanism exists). It runs to the end and its completion is rejected.
   - Renewal is timer-based and only runs while the Node event loop is
@@ -583,17 +585,19 @@ budgets, idempotency, verification, durable events, and UI remain unimplemented.
     threads were not introduced to work around this.
 - **Shutdown.**
   - SIGTERM/SIGINT stop new claims. A step already executing keeps its
-    lease renewed while it finishes, then attempts completion.
+    lease renewed while it finishes, then attempts completion or failure reporting.
   - The heartbeat loop is stopped only after the work loop has returned,
     then the pool closes. The `workers` row is left with its last
     heartbeat; there is no "stopped" marker.
   - SIGKILL or a crash runs none of this. Heartbeats and renewals stop, the
     step stays `RUNNING` until its deadline, and the sweep returns it to
-    `READY`. Work is not reassigned the moment a worker dies; it waits out
-    the lease.
+    `READY` while attempt budget remains, or to `DEAD_LETTERED` if exhausted
+    (Milestone 7). Work is not reassigned the moment a worker dies; it waits
+    out the lease.
 - **Coordinator process** (`server/src/coordinator/coordinator.ts`,
   `npm run coordinator`). Own pool, runs `runRecoveryLoop`, logs each
-  recovered step with the lease version that expired. It does not know
+  recovered step with the lease version that expired. Milestone 7 adds a
+  separate due-retry promotion pass before sleeping. It does not know
   which workers exist, does not read heartbeats, and does not signal
   workers. A dead coordinator delays recovery; it does not change who holds
   authority.
@@ -672,7 +676,7 @@ budgets, idempotency, verification, durable events, and UI remain unimplemented.
     (idempotency, not built).
   - Cancellation of an executor that has lost its lease.
   - Protection against event-loop blocking longer than the lease.
-  - Any bound on how often a failing step is retried.
+  - Milestone 5 had no bound on retries; Milestone 7 adds a total claim budget.
   - Any guarantee on recovery latency if the coordinator is down.
   - Detection of a worker that heartbeats but makes no progress: its lease
     stays live as long as renewals succeed.
@@ -780,26 +784,137 @@ cleans up its child processes, including a stopped A on failure.
 Fencing protects these controlled durable writes. It does not provide
 exactly-once execution or exactly-once side effects, prevent stale code from
 continuing to execute, physically kill stale workers, or protect external
-side effects. There is no new lifecycle state, durable event history,
+side effects. Milestone 6 introduced no new lifecycle state, durable event history,
 retry policy, or idempotency mechanism. Terminal rows preserve the generation
 and result, but do not retain worker attribution or the intermediate history.
 
-### Retries
+### Explicit failure, retries, and dead-lettering (Milestone 7)
 
-Whether a `RUNNING` failure is retryable, and whether the attempt budget
-remains, is decided once, at failure time. A retryable failure with
-attempts remaining becomes `RETRY_WAIT`, meaning that decision has already
-been made: once its backoff delay expires, if the system processes it and
-it hasn't been cancelled, its only legal next transition is `READY` —
-`RETRY_WAIT` never dead-letters directly. A non-retryable failure, or one
-with no attempts remaining, becomes `DEAD_LETTERED` directly from
-`RUNNING`, skipping the wait. This describes transition legality, not
-liveness: nothing here guarantees a coordinator will actually process an
-expired backoff in a timely way, or at all — a crashed or unavailable
-coordinator could leave a step in `RETRY_WAIT` indefinitely without that
-being an illegal state. Backoff scheduling logic is expected to be
-hand-written — this is core "difficult behavior" for the project, not
-something to delegate to a library.
+`steps` now holds `attempt_count integer NOT NULL DEFAULT 0`,
+`max_attempts integer NOT NULL DEFAULT 3`, and nullable `last_error text`.
+Checks require a nonnegative attempt count and a positive maximum. These
+are current policy/state fields, not an attempt history. Migration 0004
+uses ordinary additive defaults. The existing development row was terminal;
+its historical attempts were not inferred from its generation or backfilled.
+Existing rows therefore start counting post-migration claims from zero.
+
+`lease_version` counts ownership generations and fences stale writes.
+`attempt_count` counts successful claims as execution attempts. A claimed
+worker is about to execute; a crash between the claim and executor still
+consumes an attempt. There is no two-phase claim/start protocol. Both
+counters increment in the claim transaction and are returned to the worker,
+but they serve different purposes and are never substituted for each other.
+Failure, retry promotion, lease renewal, completion, and expiry recovery do
+not increment either counter.
+
+For an observed retryable executor failure, `max_attempts` includes the
+first attempt: with a budget of three, failures on attempts one and two
+enter RETRY_WAIT; failure on attempt three enters DEAD_LETTERED. Invalid
+input or an unsupported task type dead-letters immediately. The executor's
+single `InvalidTaskError` distinction identifies input validation failures;
+ordinary runtime exceptions remain retryable until budget is exhausted.
+There is no configurable error taxonomy or retry-policy framework.
+Claim selection and its guarded UPDATE require `attempt_count < max_attempts`,
+so even an exhausted READY row cannot consume a fourth attempt. The budget
+is checked under the claim's existing row lock, including with concurrent
+claimers. A final attempt may still renew and succeed while its lease is live;
+reaching the count limit does not revoke its current authority.
+
+`recordStepFailure` follows the existing lease-authority transaction:
+
+```text
+BEGIN (READ COMMITTED)
+SELECT id FROM steps WHERE id = $id FOR UPDATE
+UPDATE with id, RUNNING, worker ID, lease_version,
+  AND lease_expires_at > clock_timestamp()
+COMMIT
+```
+
+The first statement only takes the lock. The authorizing UPDATE runs with
+its own fresh snapshot after any wait. Under that lock, SQL decides whether
+`retryable AND attempt_count < max_attempts`; no unlocked read decides the
+outcome. Both legal transition shapes pass through the lifecycle check.
+A zero-row result means rejection with no compensating mutation. An expired
+owner cannot choose retry/dead-letter policy even before recovery, and a
+stale generation cannot make that decision for a new live owner, including
+one using the same worker ID. The PostgreSQL wall-clock assumption from
+Milestone 5 also applies to failure authorization and retry scheduling.
+
+On RETRY_WAIT, failure reporting clears owner and lease, preserves both
+counters, payload and result, stores `last_error`, and sets `available_at`
+from PostgreSQL time plus deterministic backoff:
+
+```text
+min(500ms * 2^(attempt_count - 1), 4000ms)
+500ms, 1000ms, 2000ms, 4000ms, 4000ms, ...
+```
+
+The exponent is capped before computing the power. Backoff is evaluated
+only for a retry. A materialized one-row clock CTE in the authorizing
+statement supplies one scheduling instant; it and the resulting deadline
+are returned as PostgreSQL timestamp strings, retaining microseconds for
+exact interval assertions. A delayed transaction may commit after its
+scheduled availability; the delay is measured from the database scheduling
+instant, not from COMMIT. There is no jitter.
+
+On DEAD_LETTERED, failure reporting clears owner/lease and stores the error,
+but leaves availability unchanged and schedules nothing. It is terminal:
+no claim or promotion path reads it as eligible. There is no manual replay.
+Successful completion retains `last_error` as the most recent failure, not
+as an assertion that the terminal result failed.
+
+`promoteDueRetries` locks up to 100 rows where `status = 'RETRY_WAIT' AND
+available_at <= clock_timestamp()`, ordered by availability then ID, with
+`FOR UPDATE SKIP LOCKED`. Its UPDATE only sets READY and updated_at. It
+preserves generation, attempts, error, payload and availability. Locked
+rows are eligible on later passes; multiple coordinators safely divide
+candidates. RETRY_WAIT already represents a retry decision, so promotion
+does not reclassify the error or reconsider the budget. A later fresh claim
+consumes the next attempt and creates the next ownership generation.
+
+The coordinator runs expiry recovery, then due-retry promotion, then sleeps.
+Each pass has separate error handling and a 100-row batch; no generic
+scheduler or leader election was introduced. Promotion is a liveness step:
+coordinator downtime delays readiness without granting ownership to an old
+worker. Backoff is minimum eligibility time, not an exact execution time.
+
+On executor success or failure, the worker stops and drains lease renewal
+before its corresponding guarded write. It does not wait for expiry after
+a normal error. A rejected failure report is logged and abandoned; a DB
+error means unknown outcome. Neither case resets the row or retries a stale
+report. Only an ordinary fresh claim can supply further work.
+
+`fail_then_hash` accepts `{ input, failuresBeforeSuccess }`. Input must be
+a nonempty string and the failure count a nonnegative safe integer. It
+throws a deterministic runtime error when the claim's durable attempt count
+is at most that threshold, otherwise returns the input's SHA-256 hash.
+No process-local attempt memory or side effect is involved.
+
+`npm run demo:retries` starts a real coordinator and two direct Node worker
+processes. With normal backoff values, one task fails twice then succeeds
+at attempt 3/v3; a poison task dead-letters at attempt 3/v3. It asserts
+terminal PostgreSQL state, counters, cleared ownership, unchanged payloads,
+results and errors. Committed-operation logs show transient states that
+polling can miss; no exact transition instant or durable event history is
+claimed. The demo refuses unrelated non-terminal work and shuts down all
+children.
+
+Crash recovery remains distinct from an observed failure report: a missing
+worker cannot report an exception. The expiry sweeper returns a row to READY
+only while `attempt_count < max_attempts`; an exhausted expired row goes
+directly from RUNNING to DEAD_LETTERED. Both branches preserve the counters,
+availability, payload, result and `last_error`. No executor exception is
+invented and no retry backoff is scheduled for a crash. `last_error` can be
+null on a row dead-lettered solely due to repeated lease expiry.
+
+This exception to unconditional recovery-to-READY is necessary because
+claiming consumes attempts. Otherwise a final-attempt crash would either
+permit a fourth claim or strand an unclaimable READY row. The decision and
+tradeoff are recorded in [ADR 0002](decisions/0002-attempt-budget-includes-crashes.md).
+The tests exercise three real claim/expiry/recovery cycles, ending terminal
+at attempt 3/v3 without a fourth claim. Finite budgets mean a step can
+dead-letter without ever reaching its executor if every claimant crashes
+between claim and execution. There is no automatic or manual replay here.
 
 ### Idempotency
 

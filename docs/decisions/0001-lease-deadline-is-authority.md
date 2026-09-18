@@ -86,7 +86,8 @@ the transaction holds the row lock. `recoverExpiredSteps` uses one statement:
 a CTE selects at most 100 rows with `status = 'RUNNING' AND
 lease_expires_at <= clock_timestamp()`, ordered by deadline and ID, using
 `FOR UPDATE SKIP LOCKED`; the `UPDATE ... FROM` changes only those locked
-candidates to `READY`. The two time comparisons are exact complements for
+candidates to `READY` (Milestone 7 instead dead-letters exhausted rows;
+see [ADR 0002](0002-attempt-budget-includes-crashes.md)). The two time comparisons are exact complements for
 the same row and instant.
 
 `clock_timestamp()` rather than `now()` in all three predicates: `now()` is
