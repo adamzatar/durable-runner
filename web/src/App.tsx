@@ -7,21 +7,25 @@ type HealthResponse = {
   timestamp: string;
 };
 
-type SpikeEvent = {
+type StepEvent = {
   id: number;
-  source: string;
-  message: string;
+  stepId: string;
+  workerId: string | null;
+  eventType: string;
+  data: Record<string, unknown>;
   createdAt: string;
 };
 
 // SPIKE-ONLY page. Proves API + DB + SSE integration
 // (tasks/00-environment-spike.md). Not the real UI — no navigation,
-// dashboards, or styling beyond what's needed to read the results.
+// dashboards, or styling beyond what's needed to read the results. Updated
+// in Milestone 9 only so it keeps working against the durable event stream
+// that replaced the spike endpoint; the real timeline UI is a later
+// milestone.
 export function App() {
   const [health, setHealth] = useState<HealthResponse | "loading" | "error">("loading");
   const [sseStatus, setSseStatus] = useState<"connecting" | "open" | "closed" | "error">("connecting");
-  const [events, setEvents] = useState<SpikeEvent[]>([]);
-  const [heartbeatCount, setHeartbeatCount] = useState(0);
+  const [events, setEvents] = useState<StepEvent[]>([]);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -32,18 +36,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const es = new EventSource("/api/events");
+    // Reconnects are handled by the browser, which resends the durable id of
+    // the last event it received as Last-Event-ID.
+    const es = new EventSource("/api/events/stream");
     eventSourceRef.current = es;
 
     es.onopen = () => setSseStatus("open");
     es.onerror = () => setSseStatus("error");
 
-    es.addEventListener("heartbeat", () => {
-      setHeartbeatCount((n) => n + 1);
-    });
-
-    es.addEventListener("spike-event", (evt) => {
-      const parsed = JSON.parse((evt as MessageEvent).data) as SpikeEvent;
+    es.addEventListener("step-event", (evt) => {
+      const parsed = JSON.parse((evt as MessageEvent).data) as StepEvent;
       setEvents((prev) => [parsed, ...prev].slice(0, 50));
     });
 
@@ -65,18 +67,18 @@ export function App() {
       <section>
         <h2>SSE status</h2>
         <p>connection: {sseStatus}</p>
-        <p>heartbeats received: {heartbeatCount}</p>
       </section>
 
       <section>
-        <h2>spike_events (most recent 50, includes worker-experiment rows if it's running)</h2>
+        <h2>step_events (most recent 50 received on this connection)</h2>
         {events.length === 0 ? (
           <p>none yet</p>
         ) : (
           <ul>
             {events.map((e) => (
               <li key={e.id}>
-                [{e.createdAt}] {e.source}: {e.message}
+                [{e.createdAt}] #{e.id} {e.eventType} step={e.stepId.slice(0, 8)}
+                {e.workerId ? ` worker=${e.workerId}` : ""} {JSON.stringify(e.data)}
               </li>
             ))}
           </ul>

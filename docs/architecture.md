@@ -1082,11 +1082,135 @@ verified success (the system checked the result and confirmed it) are
 recorded as separate facts. A step can complete execution and still fail
 verification, which is expected to trigger a retry like any other failure.
 
-### Event history
+### Durable event history (Milestone 9)
 
-An append-only table of structured events (state transitions, claims,
-retries, verification outcomes) is the source of truth for what the browser
-displays. The browser is not inferring history from current state alone.
+Implemented: an append-only `step_events` table, one event per committed
+lifecycle transition written in the same transaction as that transition, a
+bounded reader, a REST endpoint and an SSE stream over the durable table.
+
+**Current state vs. history.** `steps` remains the authoritative current
+state. `step_events` is a record of what happened to it. This is not event
+sourcing: no code path rebuilds a step by replaying events, there are no
+projections or reducers, and deleting the history would not change how the
+runtime behaves — only what an operator can see afterwards. The dependency
+runs one way, from state changes to history.
+
+- **Schema.** `step_events`: `id bigserial` primary key, `step_id uuid not
+  null` (deliberately not a foreign key — history must not constrain the row
+  it describes), `worker_id text null`, `event_type text not null` (plain
+  text, not an enum: the vocabulary is expected to grow and an enum would
+  need a migration per value), `data jsonb not null`, `created_at timestamptz
+  not null` from `clock_timestamp()`, and `xid xid8 not null default
+  pg_current_xact_id()`. Indexes: `(xid, id)` for the stream and
+  `(step_id, xid, id)` for one step's history.
+- **Vocabulary**, six values, each a durable transition:
+
+  | Event | Written by | `worker_id` | `data` |
+  |---|---|---|---|
+  | `STEP_CLAIMED` | claim transaction | claimant | `leaseVersion`, `attemptCount` |
+  | `STEP_SUCCEEDED` | completion transaction | completer | `leaseVersion`, `attemptCount` |
+  | `STEP_RETRY_SCHEDULED` | failure transaction | reporter | `leaseVersion`, `attemptCount`, `availableAt`, `error` |
+  | `STEP_DEAD_LETTERED` | failure transaction, or recovery | reporter / previous owner | `leaseVersion`, `attemptCount`, `reason`, `error` or `previousWorkerId` |
+  | `LEASE_RECOVERED` | recovery sweep | previous owner | `leaseVersion`, `attemptCount`, `previousWorkerId` |
+  | `RETRY_READY` | promotion sweep | null (no owner) | `leaseVersion`, `attemptCount` |
+
+- **What is deliberately not an event.** Heartbeats, lease renewals, idle
+  polls, executor log lines, and rejected stale writes. The first four happen
+  at telemetry frequency and would turn a lifecycle history into a metrics
+  firehose — a worker renewing every 5s would out-write the transitions by
+  orders of magnitude. The last is a matter of meaning: a write that matched
+  zero rows changed nothing, so recording it would put a "transition" in the
+  history that never happened. A fenced-off stale completion leaves no trace
+  here; the worker logs it, and the absence of a second `STEP_SUCCEEDED` is
+  the durable evidence.
+- **Payloads stay small and mechanism-oriented.** They carry the generation
+  and attempt a transition happened at, not a copy of the step. Results are
+  never duplicated into events — the step row holds the authoritative result.
+  Error text is truncated to 200 characters in the event, because
+  `steps.last_error` already keeps the full current text and this table is
+  append-only and never pruned; unbounded arbitrary executor strings should
+  not accumulate in permanent history.
+- **Atomicity is the rule.** Every event is written inside the transaction
+  that performs its state change, so the two cannot disagree: a committed
+  transition always has its event, and an event never describes a transition
+  that rolled back.
+  - Claim, completion and failure already ran lock-first transactions; the
+    event `INSERT` is one more statement inside each, driven by the row the
+    authorizing `UPDATE` actually returned. Zero rows updated means no event.
+  - Recovery and promotion stay **single bulk statements**, with the event
+    insert as a data-modifying CTE over the rows the `UPDATE` returned. That
+    keeps `SKIP LOCKED`, the 100-row batch bound and atomicity together,
+    and avoids holding every recovered row's lock across an extra client
+    round trip (the Milestone 5 lesson about locks and round trips).
+  - There is no asynchronous or best-effort event write anywhere. Proven by
+    injecting an insert failure at the database boundary: the claim,
+    completion, failure and recovery transitions all roll back completely.
+- **Recovery events name the owner that lost authority.** The `expired` CTE
+  captures `current_worker_id` before the `UPDATE` clears it, so
+  `LEASE_RECOVERED` records the previous owner instead of the `NULL` the row
+  ends up with. Exactly one event per recovered step; rows another sweeper
+  holds locked are skipped and get no event, and whichever later sweep
+  actually recovers them writes the single event for that transition. The
+  same holds for promotion: concurrent coordinators cannot both record a
+  transition, because only the transaction whose `UPDATE` matched the row
+  inserts its event.
+- **Histories the milestone produces.** A crash/recovery cycle reads:
+  `STEP_CLAIMED v1 · LEASE_RECOVERED v1 · STEP_CLAIMED v2 · STEP_SUCCEEDED
+  v2`. A retry cycle reads: `STEP_CLAIMED · STEP_RETRY_SCHEDULED ·
+  RETRY_READY · STEP_CLAIMED · STEP_SUCCEEDED`. Both are asserted as exact
+  sequences in tests, and they are what the later timeline UI will render.
+- **Cursor and ordering.** Reads use a transaction-id watermark with a
+  composite `(xid, id)` cursor; the full reasoning, the alternatives and the
+  demonstrated failure of a sequence-only cursor are in
+  `docs/decisions/0003-event-cursor-watermark.md`. In short:
+  - **Guaranteed:** no committed event is skipped; reads are ascending in a
+    stable total order; reads are always bounded; a client resumes from the
+    last durable id it saw.
+  - **Not guaranteed:** gap-free ids (a rolled-back transition burns its id);
+    that id order equals commit order globally; that `created_at` order
+    equals delivery order; exactly-once delivery to a client (a reconnect
+    with an older cursor re-delivers).
+  - **Within one step** the question does not arise: every transition holds
+    that step's row lock until commit, so a step's events are totally ordered
+    and id order agrees with delivery order.
+  - **Cost:** an event is withheld while any older writing transaction is
+    open, so stream latency trails the oldest in-flight write transaction.
+    Read-only transactions do not hold the watermark back.
+- **REST.** `GET /api/events?afterId=<id>&stepId=<uuid>&limit=<n>` returns
+  `{ events, nextAfterId }` with `id`, `stepId`, `workerId`, `eventType`,
+  `data`, `createdAt` — an explicit wire shape, not database rows. Inputs are
+  validated (400 on a malformed parameter or an id this system never issued,
+  rather than silently restarting a client's history); `limit` defaults to
+  100 and is capped at 500; there is no unbounded read.
+- **SSE.** `GET /api/events/stream` tails the same table by polling every
+  500ms — no `LISTEN`/`NOTIFY`, no WebSockets, no broker, no pub/sub. Each
+  message uses the durable event id as its SSE `id:`, so a browser
+  reconnecting sends `Last-Event-ID` automatically and resumes after the last
+  event it actually received; `?afterId=` does the same for non-browser
+  clients. The server keeps no per-client state — the cursor lives with the
+  client and the table is the only source. Polls are sequential (never
+  overlapping), comment frames keep the connection alive without being
+  delivered as events, and a disconnect stops the loop (asserted by a test
+  watching the open-stream count return to zero). The Phase-0 spike endpoint
+  that tailed `spike_events` is gone; the spike page was repointed at the new
+  stream so it keeps working, and remains a spike page.
+- **Retention: none.** Events are never updated, deleted, compacted or
+  archived. History grows without bound, one row per transition. At demo
+  scale that is acceptable and deliberate; a real deployment would need a
+  retention or partitioning policy, and this project does not have one.
+- **Performance.** Every lifecycle transition now carries one extra durable
+  write, and the claim/completion/failure transactions hold their row lock
+  for one extra statement. That is the intended shape, not an oversight; it
+  is measured in the benchmarking milestone rather than pre-optimized.
+- **Not implemented here.** No submission event: there is no canonical
+  submission operation yet (steps are inserted directly by demos and tests),
+  and inventing an API just to emit `STEP_SUBMITTED` would distort this
+  milestone. Durable history begins at the first claim, and a future
+  submission API can insert the step and its event in one transaction. No
+  effect events either: `idempotent_effects` is a separate durable boundary
+  with its own semantics, and folding it into step lifecycle history would
+  mean either a second transaction (breaking the atomicity rule) or
+  entangling the effect boundary with step state.
 
 ### API shape
 

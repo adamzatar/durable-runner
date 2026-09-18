@@ -11,6 +11,11 @@ import { transitionStepStatus } from "../domain/step-transitions.js";
  */
 export async function promoteDueRetries<TSchema extends Record<string, unknown>>(db: NodePgDatabase<TSchema>) {
   transitionStepStatus("RETRY_WAIT", "READY");
+  // Single statement for the same reason as recovery: the promotion and its
+  // RETRY_READY event commit together, the batch stays bounded, and locked
+  // rows are still skipped rather than waited on. A row skipped here gets no
+  // event now and exactly one when a later sweep promotes it, so concurrent
+  // promoters cannot both record the same transition.
   const result = await db.execute<{ id: string; lease_version: number; attempt_count: number }>(sql`
     with due as (
       select id from steps
@@ -18,10 +23,25 @@ export async function promoteDueRetries<TSchema extends Record<string, unknown>>
       order by available_at asc, id asc
       limit 100
       for update skip locked
+    ),
+    promoted as (
+      update steps set status = 'READY', updated_at = now()
+      from due where steps.id = due.id
+      returning steps.id, steps.lease_version, steps.attempt_count
+    ),
+    events as (
+      insert into step_events (step_id, worker_id, event_type, data, created_at)
+      select promoted.id,
+             null::text,
+             'RETRY_READY',
+             jsonb_build_object('leaseVersion', promoted.lease_version, 'attemptCount', promoted.attempt_count),
+             clock_timestamp()
+      from promoted
+      returning step_id
     )
-    update steps set status = 'READY', updated_at = now()
-    from due where steps.id = due.id
-    returning steps.id, steps.lease_version, steps.attempt_count
+    select promoted.id, promoted.lease_version, promoted.attempt_count
+    from promoted
+    join events on events.step_id = promoted.id
   `);
   return result.rows.map((row) => ({ id: row.id, leaseVersion: row.lease_version, attemptCount: row.attempt_count }));
 }

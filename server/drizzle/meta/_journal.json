@@ -43,6 +43,13 @@
       "when": 1789690014185,
       "tag": "0005_colorful_white_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789697451353,
+      "tag": "0006_tired_golden_guardian",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { transitionStepStatus } from "../domain/step-transitions.js";
+import { recordStepEvent } from "./step-events.js";
 
 // Thrown when the completion write did not affect exactly one row. Unlike
 // ClaimConsistencyError, this can mean several different things (lease
@@ -97,7 +98,7 @@ export async function completeStepSuccess<TSchema extends Record<string, unknown
       return 0;
     }
 
-    const updated = await tx.execute(sql`
+    const updated = await tx.execute<{ id: string; lease_version: number; attempt_count: number }>(sql`
       update steps
       set status = 'SUCCEEDED',
           result = ${JSON.stringify(params.result)}::jsonb,
@@ -109,11 +110,21 @@ export async function completeStepSuccess<TSchema extends Record<string, unknown
         and current_worker_id = ${params.workerId}
         and lease_version = ${params.leaseVersion}
         and lease_expires_at > clock_timestamp()
-      returning id
+      returning id, lease_version, attempt_count
     `);
     // A zero-row result is returned rather than thrown here, so the
     // transaction commits (releasing the lock, having written nothing)
-    // and the rejection is raised outside it.
+    // and the rejection is raised outside it. A rejected stale completion
+    // therefore records NO event: nothing transitioned.
+    const row = updated.rows[0];
+    if (row) {
+      await recordStepEvent(tx, {
+        stepId: row.id,
+        workerId: params.workerId,
+        eventType: "STEP_SUCCEEDED",
+        data: { leaseVersion: row.lease_version, attemptCount: row.attempt_count },
+      });
+    }
     return updated.rows.length;
   });
 

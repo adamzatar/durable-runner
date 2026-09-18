@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { parseStepStatus } from "../domain/step-status.js";
 import { transitionStepStatus } from "../domain/step-transitions.js";
+import { recordStepEvent } from "./step-events.js";
 
 // How long a lease runs for, measured from the claim's ownership write and
 // again from each successful renewal. The deadline is computed from the
@@ -204,6 +205,15 @@ export async function claimNextStep<TSchema extends Record<string, unknown>>(
     }
 
     const row = claimed.rows[0] as ClaimedRow;
+    // Same transaction as the ownership write: a committed claim always has
+    // its STEP_CLAIMED event, and a claim that rolls back leaves none.
+    await recordStepEvent(tx, {
+      stepId: row.id,
+      workerId: row.current_worker_id,
+      eventType: "STEP_CLAIMED",
+      data: { leaseVersion: row.lease_version, attemptCount: row.attempt_count },
+    });
+
     return {
       claimed: true,
       step: {

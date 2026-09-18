@@ -1,6 +1,14 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgEnum, pgTable, serial, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { bigserial, check, customType, index, integer, jsonb, pgEnum, pgTable, serial, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { STEP_STATUSES } from "../domain/step-status.js";
+
+// PostgreSQL's 64-bit transaction id (PG13+). Not wraparound-prone like the
+// 32-bit `xid`, and fully ordered/indexable. Drizzle has no built-in type
+// for it, and it needs no client-side parsing: it is only ever compared
+// inside SQL, and handed back to SQL as text.
+const xid8 = customType<{ data: string; driverData: string }>({
+  dataType: () => "xid8",
+});
 
 // SPIKE-ONLY TABLE. Exists to prove that a real Drizzle migration, plus
 // reads/writes from independent processes against shared PostgreSQL state,
@@ -175,3 +183,68 @@ export const idempotentEffects = pgTable("idempotent_effects", {
   // as workers/leases. Never updated; a stored effect is immutable.
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 });
+
+// Append-only operational history of committed step lifecycle transitions
+// (Milestone 9). `steps` remains the authoritative current state: nothing in
+// the runtime rebuilds a step by replaying these rows. This is history for
+// operators and the future timeline UI, not event sourcing — there are no
+// projections, no reducers, and no code path that reads an event to decide
+// what a step is.
+//
+// Every row is written inside the same transaction as the state change it
+// describes, so a committed transition always has its event and an event
+// never describes a transition that rolled back.
+//
+// Rows are never updated or deleted. There is no retention policy,
+// compaction or archival in this project: history grows without bound, which
+// is acceptable at demo scale and is stated plainly in docs/architecture.md.
+export const stepEvents = pgTable(
+  "step_events",
+  {
+    // Durable cursor. Allocated from a sequence at INSERT time, which is NOT
+    // the same instant as COMMIT: ids are assigned in allocation order, and
+    // transactions become visible in commit order. Readers therefore never
+    // page on this column alone — see `xid` below and db/step-events.ts.
+    // Sequences also leave gaps (a rolled-back transition keeps its
+    // allocated id forever), so consumers must not assume contiguity.
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    // Plain uuid, deliberately not a foreign key to `steps`: history must
+    // outlive and never constrain the lifecycle of the row it describes.
+    stepId: uuid("step_id").notNull(),
+    // Who caused the transition, where that is meaningful: the claimant, the
+    // worker that reported a failure, or the owner that LOST authority on
+    // recovery. Null for coordinator-driven transitions with no owner, such
+    // as retry promotion.
+    workerId: text("worker_id"),
+    // Plain text, not a Postgres enum: the vocabulary is expected to grow,
+    // and an enum would need an ALTER TYPE migration per new event. The
+    // canonical list lives in db/step-events.ts.
+    eventType: text("event_type").notNull(),
+    // Small, mechanism-oriented payload. Deliberately not a copy of the step
+    // row: the step keeps the authoritative result/error, the event records
+    // the generation and attempt the transition happened at.
+    data: jsonb("data").notNull(),
+    // Database clock, same convention as every other coordination timestamp.
+    // Useful for display; it is NOT the ordering key, because two
+    // transactions can take timestamps in one order and commit in another.
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    // The transaction that wrote this event. This is what makes a
+    // no-loss cursor possible: a reader can ask PostgreSQL which
+    // transactions are definitely finished (pg_snapshot_xmin) and only
+    // stream events at or below that watermark, in (xid, id) order. Without
+    // it, an event allocated early but committed late is silently skipped
+    // once a later-allocated, earlier-committed event advances the cursor
+    // past it. See docs/decisions/0003-event-cursor-watermark.md.
+    xid: xid8("xid")
+      .notNull()
+      .default(sql`pg_current_xact_id()`),
+  },
+  () => [
+    // The stream: watermark filter plus (xid, id) cursor, in one index scan.
+    index("step_events_stream_idx").on(sql`xid ASC`, sql`id ASC`),
+    // One step's history, in the same total order the stream uses. Within a
+    // single step the two orders always agree, because every transition
+    // holds that step's row lock until commit.
+    index("step_events_step_idx").on(sql`step_id`, sql`xid ASC`, sql`id ASC`),
+  ],
+);

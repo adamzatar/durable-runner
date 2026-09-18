@@ -79,25 +79,57 @@ export async function recoverExpiredSteps<TSchema extends Record<string, unknown
   transitionStepStatus("RUNNING", "READY");
   transitionStepStatus("RUNNING", "DEAD_LETTERED");
 
+  // One statement, so the sweep's state changes and their events commit
+  // together while keeping the bounded SKIP LOCKED batch. Wrapping the
+  // UPDATE and a separate event INSERT in a client-side transaction would
+  // also be atomic, but would hold every recovered row's lock across an
+  // extra client round trip, which is exactly what a sweep should not do.
+  //
+  // `expired` captures current_worker_id BEFORE the UPDATE clears it, so
+  // LEASE_RECOVERED names the owner that actually lost authority rather than
+  // the NULL the row ends up with. Rows another sweeper has locked are
+  // skipped here and get no event; whichever sweep actually recovers them
+  // later writes the one event for that transition.
   const recovered = await db.execute<RecoveredRow>(sql`
     with expired as (
-      select id
+      select id, current_worker_id
       from steps
       where status = 'RUNNING'
         and lease_expires_at <= clock_timestamp()
       order by lease_expires_at asc, id asc
       limit 100
       for update skip locked
+    ),
+    resolved as (
+      update steps
+      set status = case when attempt_count < max_attempts
+                        then 'READY'::step_status else 'DEAD_LETTERED'::step_status end,
+          current_worker_id = null,
+          lease_expires_at = null,
+          updated_at = now()
+      from expired
+      where steps.id = expired.id
+      returning steps.id, steps.lease_version, steps.attempt_count, steps.status,
+                expired.current_worker_id as previous_worker_id
+    ),
+    events as (
+      insert into step_events (step_id, worker_id, event_type, data, created_at)
+      select resolved.id,
+             resolved.previous_worker_id,
+             case when resolved.status = 'READY' then 'LEASE_RECOVERED' else 'STEP_DEAD_LETTERED' end,
+             jsonb_build_object(
+               'leaseVersion', resolved.lease_version,
+               'attemptCount', resolved.attempt_count,
+               'previousWorkerId', resolved.previous_worker_id
+             ) || case when resolved.status = 'READY' then '{}'::jsonb
+                       else jsonb_build_object('reason', 'lease_expired_attempt_budget_exhausted') end,
+             clock_timestamp()
+      from resolved
+      returning step_id
     )
-    update steps
-    set status = case when attempt_count < max_attempts
-                      then 'READY'::step_status else 'DEAD_LETTERED'::step_status end,
-        current_worker_id = null,
-        lease_expires_at = null,
-        updated_at = now()
-    from expired
-    where steps.id = expired.id
-    returning steps.id, steps.lease_version, steps.status
+    select resolved.id, resolved.lease_version, resolved.status
+    from resolved
+    join events on events.step_id = resolved.id
   `);
 
   return recovered.rows.map((row) => ({ id: row.id, leaseVersion: row.lease_version, status: row.status }));

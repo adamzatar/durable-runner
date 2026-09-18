@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { transitionStepStatus } from "../domain/step-transitions.js";
+import { recordStepEvent, truncateEventError } from "./step-events.js";
 
 export interface RecordStepFailureParams {
   id: string;
@@ -67,7 +68,32 @@ export async function recordStepFailure<TSchema extends Record<string, unknown>>
       returning status, attempt_count, lease_version, available_at::text, decision_clock.decided_at::text
     `);
     const row = updated.rows[0];
+    // Rejected (expired or stale) failure reports change nothing and are not
+    // transitions, so they record no event.
     if (!row) return { recorded: false } as const;
+
+    // One event per transition, chosen by the status the UPDATE actually
+    // produced rather than by re-deriving the budget decision here.
+    await recordStepEvent(tx, {
+      stepId: params.id,
+      workerId: params.workerId,
+      eventType: row.status === "RETRY_WAIT" ? "STEP_RETRY_SCHEDULED" : "STEP_DEAD_LETTERED",
+      data:
+        row.status === "RETRY_WAIT"
+          ? {
+              leaseVersion: row.lease_version,
+              attemptCount: row.attempt_count,
+              availableAt: row.available_at,
+              error: truncateEventError(params.error),
+            }
+          : {
+              leaseVersion: row.lease_version,
+              attemptCount: row.attempt_count,
+              reason: params.retryable ? "attempt_budget_exhausted" : "non_retryable_failure",
+              error: truncateEventError(params.error),
+            },
+    });
+
     return {
       recorded: true, status: row.status, attemptCount: row.attempt_count,
       leaseVersion: row.lease_version, availableAt: row.available_at, decidedAt: row.decided_at,

@@ -234,3 +234,41 @@ not a routine setup log.
   worker-b claimed v2 and completed the step carrying worker-a's `effectId`,
   and worker-a's resumed v1 completion was rejected — one effect row
   throughout.
+
+## 2026-09-18 — Milestone 9 event cursor
+
+- Checked the polling cursor against PostgreSQL before building on it, and
+  the obvious design turned out to be broken. `bigserial` ids are allocated
+  at INSERT, rows become visible at COMMIT, and those orders are independent.
+  Staged it directly: transaction A inserted event id 1 and stayed open,
+  transaction B inserted id 2 and committed. A reader doing
+  `WHERE id > $cursor ORDER BY id` saw only id 2, advanced its cursor to 2,
+  and after A committed, id 1 was permanently behind the cursor. A committed
+  transition would simply never have been delivered. Both halves of that —
+  the naive reader losing the event, and the watermark reader delivering
+  both — are now tests rather than claims.
+- Settled on storing each event's writing transaction (`xid8`) and reading
+  with `xid < pg_snapshot_xmin(pg_current_snapshot())` plus a composite
+  `(xid, id)` cursor, after rejecting an overlap window (the safe overlap is
+  unbounded), serializing all event inserts behind a lock (a global
+  bottleneck in front of every transition, right before the benchmarking
+  milestone) and ordering by timestamp (same defect). ADR 0003 records the
+  alternatives. Verified before implementing that `xid8` supports a btree
+  index and that the planner uses `(xid, id)` for both the watermark and the
+  cursor comparison.
+- Ordering by `id` alone was not enough even with the watermark: a
+  transaction can be assigned a lower xid and still allocate a higher id, so
+  two already-final transactions can disagree. The sort key is `(xid, id)`
+  for that reason.
+- Recovery and promotion kept their single-statement `SKIP LOCKED` shape by
+  writing their events in a data-modifying CTE over the rows the UPDATE
+  returned. The alternative — UPDATE, then a separate INSERT inside a
+  client-side transaction — would also have been atomic but would have held
+  every recovered row's lock across an extra client round trip, which is the
+  thing Milestone 5 established a sweep must not do.
+- The rollback proof needed a deterministic way to fail an event insert. A
+  `BEFORE INSERT` trigger created and dropped inside the test does it at the
+  database boundary, with no permanent hook in production code. One surprise
+  while writing it: Drizzle wraps driver errors as "Failed query: ...", so
+  the injected message is on the cause chain, not `error.message` — the first
+  version of the assertion passed for the wrong reason until that was fixed.
