@@ -4,7 +4,8 @@ import { STEP_LEASE_DURATION_MS, claimNextStep } from "../db/claim-step.js";
 import { CompletionConsistencyError, completeStepSuccess } from "../db/complete-step.js";
 import { renewStepLease } from "../db/renew-step-lease.js";
 import { recordStepFailure } from "../db/record-step-failure.js";
-import { executeStep, InvalidTaskError } from "./execute-step.js";
+import { applyIdempotentEffect } from "../db/idempotent-effect.js";
+import { executeStep, InvalidTaskError, type ExecutionContext } from "./execute-step.js";
 
 // Fixed-interval polling, no LISTEN/NOTIFY. Small enough to feel responsive
 // in a demo, large enough that an idle worker isn't hammering Postgres in a
@@ -199,7 +200,11 @@ export async function runWorkerLoop<TSchema extends Record<string, unknown>>(
 
     let execution: { ok: true; output: Record<string, unknown> } | { ok: false; error: unknown };
     try {
-      const pendingExecution = executeStep(step);
+      // The executor's only capability, built from this worker's own
+      // connection. Effect writes commit on their own, never inside the
+      // completion transaction below — see db/idempotent-effect.ts.
+      const context: ExecutionContext = { applyEffect: (request) => applyIdempotentEffect(db, request) };
+      const pendingExecution = executeStep(step, context);
       // Emitted after invoking the executor: the fencing demo can pause
       // this process with its original delay already underway.
       log(`[${workerId}] execution started for step ${step.id} at lease_version ${step.leaseVersion}`);

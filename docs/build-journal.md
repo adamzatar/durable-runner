@@ -203,3 +203,34 @@ not a routine setup log.
   count to zero rather than pretending generation 2 proves two executions.
   New claims count attempts from migration onward; ownership generations
   retain their existing meaning.
+
+## 2026-09-17 — Milestone 8 idempotent effects
+
+- Checked PostgreSQL 16.15's `INSERT ... ON CONFLICT DO NOTHING` behaviour
+  before designing around it, rather than assuming. With another transaction
+  holding an uncommitted insert of the same key, the statement waits on that
+  transaction (`pg_stat_activity.wait_event_type = Lock`) and returns zero
+  rows once it commits; it does not raise a unique violation. That is what
+  makes "zero rows means it already exists" a safe branch.
+- The obvious single-statement form of the same operation is wrong, and the
+  experiment caught it before any code depended on it. A CTE combining
+  `INSERT ... ON CONFLICT DO NOTHING` with a `UNION ALL` fallback `SELECT`
+  returned **zero rows** when the conflicting row was committed by another
+  transaction during the wait: a statement's snapshot is taken before it
+  blocks, so the fallback select cannot see that row. Under the same race,
+  two separate statements returned the stored result correctly, because the
+  second statement takes a fresh snapshot under READ COMMITTED. The effect
+  operation is therefore two statements, and the reason is recorded in the
+  code so nobody "optimizes" it back into one.
+- Wrote a test for the `EffectStateError` guard (key present for the insert's
+  conflict, gone by the follow-up read) and deleted it again: triggering it
+  needs a delete to land between the two statements, and the attempt raced —
+  the caller's read won and the effect was reused instead. Reaching that path
+  reliably would need a test-only seam in production code, which is worse
+  than an untested defensive guard. The guard stays, with a comment saying it
+  is deliberately uncovered and why.
+- The first demo run passed end to end with no adjustment: worker-a applied
+  the effect, was SIGSTOPped inside `delayAfterEffectMs`, lost its lease,
+  worker-b claimed v2 and completed the step carrying worker-a's `effectId`,
+  and worker-a's resumed v1 completion was rejected — one effect row
+  throughout.

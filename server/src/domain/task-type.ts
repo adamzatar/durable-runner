@@ -4,7 +4,7 @@
 // ALTER TYPE ... ADD VALUE migration for every new task. The trade is that
 // an invalid value isn't rejected at insert time, only when a worker
 // actually tries to execute it — parseTaskType is that boundary check.
-export const TASK_TYPES = ["hash_after_delay", "fail_then_hash"] as const;
+export const TASK_TYPES = ["hash_after_delay", "fail_then_hash", "idempotent_effect"] as const;
 
 export type TaskType = (typeof TASK_TYPES)[number];
 

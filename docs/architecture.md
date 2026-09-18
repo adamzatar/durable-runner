@@ -916,13 +916,164 @@ at attempt 3/v3 without a fourth claim. Finite budgets mean a step can
 dead-letter without ever reaching its executor if every claimant crashes
 between claim and execution. There is no automatic or manual replay here.
 
-### Idempotency
+### Idempotent side effects (Milestone 8)
 
-An idempotency record (keyed by something like `step_id` + `attempt` or a
-caller-supplied key, table TBD) is written before/around performing an
-external side effect, so a retried step can detect "this side effect
-already happened" and skip re-performing it, independent of whether fencing
-also applies.
+Implemented: a simulated durable effect store keyed by an idempotency key,
+one task type that uses it, and demonstrations — automated and with real
+processes — that a step can execute more than once while its logical side
+effect happens once.
+
+**Three mechanisms, three different jobs.** This is the distinction the
+milestone exists to make:
+
+| Mechanism | Protects | Authority | Answers |
+|---|---|---|---|
+| Lease (`lease_expires_at`) | Ownership over time | Database clock | "May I still act as owner?" |
+| Fencing generation (`lease_version`) | The *step row* | The completion/renewal/failure predicate | "Is this writer still the current owner?" |
+| Idempotency key | The *logical side effect* | Primary key on `idempotent_effects` | "Has this effect already happened?" |
+
+Fencing rejects a stale worker's step write. It cannot reach outside the
+database to undo an effect that worker already performed — by the time the
+write is rejected, the effect is long committed. The idempotency key is what
+makes performing that effect again safe, and it is needed even when the
+executor did nothing wrong: a frozen process, an expired lease and an
+ordinary retry all produce a second execution of the same logical work.
+
+**The canonical scenario** (automated in `idempotency.test.ts`, run with real
+processes by `npm run demo:idempotency`):
+
+```text
+A claims v1, attempt 1
+A applies effect K            -> effect row committed
+A freezes (SIGSTOP) inside delayAfterEffectMs
+A's lease expires             -> database clock, not a heartbeat verdict
+coordinator recovers          -> READY, still v1, attempt_count 1
+B claims v2, attempt 2
+B executes the same task
+B requests effect K           -> existing row returned, nothing applied
+B completes                   -> SUCCEEDED v2, result = K's stored result
+A resumes (SIGCONT)
+A re-requests K               -> existing row returned, still no second effect
+A attempts completion at v1   -> rejected by fencing, no mutation
+final: 1 effect row, 1 SUCCEEDED step, 2 executions
+```
+
+- **Effect store.** `idempotent_effects`: `idempotency_key text` primary key,
+  `effect_type text`, `request jsonb`, `result jsonb`, `created_at timestamptz`
+  written from `clock_timestamp()` with no default. Rows are immutable once
+  written; nothing updates or deletes them (no expiry, no garbage
+  collection). Migration `0005` creates it empty — there is no historical
+  effect to infer.
+- **What it simulates.** A durable boundary outside this system that cannot
+  be rolled back, and that offers an idempotency contract. There is no HTTP,
+  no queue, no webhook, no payment API, no outbox and no distributed
+  transaction. The row *is* the effect.
+- **The operation** (`server/src/db/idempotent-effect.ts`), two statements,
+  each its own autocommit transaction, no advisory locks:
+  1. `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING result,
+     created_at`. One row back means this caller applied the effect. The
+     primary key is the concurrency authority — there is no application-level
+     "check, then insert".
+  2. Zero rows means it already exists: read the row back and let PostgreSQL
+     evaluate `effect_type = $type AND request = $request::jsonb` as a match
+     flag. A match returns the stored result; a mismatch throws
+     `IdempotencyConflictError` and writes nothing.
+- **Verified PostgreSQL behaviour** (16.15, measured before the design was
+  fixed — see `docs/build-journal.md`):
+  - With a concurrent *uncommitted* insert of the same key, `ON CONFLICT DO
+    NOTHING` waits on that transaction (`wait_event_type = Lock`) and then
+    returns zero rows once it commits. It does not raise a unique violation.
+  - Doing the fallback read in the *same* statement (a CTE with `INSERT ...
+    ON CONFLICT DO NOTHING` plus a `UNION ALL` select) returns **no rows at
+    all** in that race: the statement's snapshot is taken before it waits, so
+    the fallback select cannot see the row the other transaction committed
+    during the wait. A second statement takes a fresh snapshot under READ
+    COMMITTED and sees it. That is why this is two statements.
+- **Result generation.** The first applier mints `{ effectId: uuid, value }`.
+  Every later caller — a loser of a concurrent race, a retry, a re-execution
+  after recovery, a resumed stale generation — receives that stored result
+  verbatim, including the original `effectId`. A freshly generated result is
+  never returned as if it were the stored one; a caller whose insert
+  conflicts discards the identifier it minted.
+- **Key reuse is rejected, not absorbed.** The same key with a different
+  `effect_type` or a different `request` throws instead of returning the
+  earlier result, so an accidentally reused key surfaces as an error rather
+  than as a plausible-looking wrong value. Requests are compared with
+  PostgreSQL `jsonb` equality, so property order alone is not a conflict.
+- **Task type** `idempotent_effect`, payload
+  `{ idempotencyKey, value, delayAfterEffectMs }`. It applies or reuses the
+  effect, waits `delayAfterEffectMs`, and returns the stored effect result,
+  which the worker's ordinary completion persists as the step result. The
+  delay exists only to make the failure window (effect durable, completion
+  not yet written) reachable on purpose; it is validated and bounded like
+  every other payload field, and invalid payloads are `InvalidTaskError`,
+  which dead-letters immediately rather than retrying.
+  - The step result is exactly the effect result, with no "did I apply it"
+    flag: whether a particular execution applied or reused is local to that
+    execution, while the step result describes the logical effect. That is
+    what makes a re-executed step's result identical to the original's.
+- **Executor integration.** `executeStep(step, context)` takes one explicit
+  capability, `{ applyEffect }`, built by the worker loop from its own
+  connection. Not a container, registry, plugin system or repository layer —
+  a single function, so a task cannot reach the database for anything else.
+  Pure tasks are given a context that throws if called, which is asserted.
+- **Transaction boundary (the important part).** The effect commits in its
+  own transaction, before the executor's delay, and the step completion is a
+  separate lock-first transaction afterwards. They are deliberately *not*
+  combined. Committing them together would make the step outcome and the
+  effect atomic and would erase the exact window this milestone demonstrates:
+  effect committed, process lost, completion never written. Nothing in the
+  retry/recovery path compensates for that window — the idempotency key is
+  what makes it safe.
+- **Honest limitation of the simulation.** A real external effect would be
+  performed between the insert and its commit, so a crash there could leave
+  an effect performed with no row recorded, or a row recorded for an effect
+  that never happened. This store has no such gap because the row is the
+  effect. The contract demonstrated is the one a real API must offer for a
+  retried step to be safe; nothing here makes an arbitrary API idempotent.
+- **Tests.**
+  - `idempotent-effects.test.ts`: first application (one row, generated
+    identifier, `created_at` bracketed by database-clock readings); repeats
+    return the stored result and write nothing; conflicting request and
+    conflicting effect type rejected with the stored row untouched; jsonb
+    equality ignores property order; different keys independent; blank and
+    over-long keys rejected; and 12 concurrent callers on independent
+    connections producing exactly one row, exactly one `applied: true`, and
+    one distinct `effectId` observed by every caller.
+  - `idempotency.test.ts`: the real worker loop freezing past its lease after
+    its effect committed, then recovering and re-executing to `SUCCEEDED` at
+    `lease_version` 2 / `attempt_count` 2 with the original effect result;
+    the stale-generation sequence where the old generation re-requests the
+    effect (no second effect) and its completion is fenced off while the v2
+    row stays byte-for-byte unchanged; and a re-execution producing the same
+    result as the execution that applied the effect. These use the **same
+    worker ID** across generations, so `lease_version` is the term that
+    distinguishes stale ownership.
+  - `execute-step.test.ts`: the task asks for the payload's key, returns the
+    stored result whether applied or reused, delays only after the effect
+    layer returns, rejects malformed payloads without calling the effect
+    layer, and surfaces an effect-layer rejection as an ordinary retryable
+    failure.
+  - Checked against deliberately broken versions, each restored: treating a
+    duplicate key as a fresh effect (`DO UPDATE` overwriting the stored
+    result), never comparing the stored request/type, returning a newly
+    minted result on a duplicate, and replacing the insert with an
+    unprotected `SELECT`-then-`INSERT` (caught by the concurrency test).
+- **Demo** (`npm run demo:idempotency`). Real child processes, production
+  timings, ~45s. The SIGSTOP trigger is the effect row appearing in
+  PostgreSQL rather than a log line — the durable effect is what the
+  orchestration waits for. Every claim asserts durable state; logs are
+  evidence of what each process did, never coordination. Each run uses a
+  fresh key so a rerun applies a genuinely new effect.
+- **What this does and does not license saying.** With this milestone:
+  *at-least-once execution with idempotent side-effect handling*. Not:
+  exactly-once execution, exactly-once external side effects in general,
+  that arbitrary APIs become idempotent, that PostgreSQL fencing prevents
+  external duplicate effects, or anything involving distributed
+  transactions.
+- **Deliberately absent.** Idempotency expiry or garbage collection, keys
+  derived automatically from step identity, effect history beyond the single
+  stored row, an outbox, sagas, or any second effect type.
 
 ### Verification
 

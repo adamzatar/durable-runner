@@ -139,3 +139,39 @@ export const workers = pgTable("workers", {
   startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
   lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull(),
 });
+
+// Simulated external side-effect boundary (Milestone 8). This stands in for
+// a durable effect outside this system — a receipt created at a payment
+// provider, a message handed to a mail service — that a retried or
+// re-executed step must not duplicate. It is a demonstration of an
+// idempotency contract, not an integration with anything: there is no HTTP,
+// no queue, no outbox, no distributed transaction.
+//
+// The row IS the effect. Its existence means "this logical effect has been
+// applied"; its stored result is what every later caller with the same key
+// gets back, including the identifier minted by the first application.
+//
+// Deliberately written OUTSIDE the transaction that completes a step (see
+// db/idempotent-effect.ts). Combining them would close the very window this
+// milestone exists to show: effect committed, process lost before its step
+// completion committed.
+export const idempotentEffects = pgTable("idempotent_effects", {
+  // Supplied by the caller and stable across re-executions of the same
+  // logical work; the primary key is what makes duplicate application
+  // impossible rather than merely unlikely. A step's payload carries it, so
+  // every generation that executes that step derives the same key.
+  idempotencyKey: text("idempotency_key").primaryKey(),
+  // What kind of effect this key stands for. Stored so a repeat request
+  // that means something different can be rejected instead of silently
+  // receiving another effect's result.
+  effectType: text("effect_type").notNull(),
+  // The logical request this key was first applied with, compared with
+  // PostgreSQL's jsonb equality on every repeat.
+  request: jsonb("request").notNull(),
+  // What the first successful application produced. Returned verbatim
+  // afterwards — never regenerated.
+  result: jsonb("result").notNull(),
+  // No default: written explicitly from clock_timestamp(), same convention
+  // as workers/leases. Never updated; a stored effect is immutable.
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+});

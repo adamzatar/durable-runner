@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { parseTaskType } from "../domain/task-type.js";
+import { DEMO_EFFECT_TYPE, MAX_IDEMPOTENCY_KEY_LENGTH, type EffectOutcome, type EffectRequest } from "../db/idempotent-effect.js";
 
 // One distinction: unchanged invalid input cannot improve on a retry.
 // Ordinary exceptions from a validated task remain retryable.
@@ -22,6 +23,20 @@ export class InvalidTaskError extends Error {
 // executor, not of executors in general: code that blocks the event loop
 // for longer than the lease stops renewal and loses the lease.
 export const MAX_TASK_DELAY_MS = 60_000;
+
+// The one capability an executor is handed. A single function, not a
+// container, registry or repository layer: only idempotent_effect uses it,
+// and it is passed explicitly so a task cannot reach the database for
+// anything else.
+export interface ExecutionContext {
+  applyEffect: (request: EffectRequest) => Promise<EffectOutcome>;
+}
+
+export interface IdempotentEffectPayload {
+  idempotencyKey: string;
+  value: string;
+  delayAfterEffectMs: number;
+}
 
 export interface HashAfterDelayPayload {
   input: string;
@@ -76,8 +91,69 @@ function failThenHash(payload: unknown, attemptCount: number): HashAfterDelayRes
   return { hash: createHash("sha256").update(input).digest("hex") };
 }
 
+function parseIdempotentEffectPayload(payload: unknown): IdempotentEffectPayload {
+  if (typeof payload !== "object" || payload === null) {
+    throw new InvalidTaskError(`idempotent_effect payload must be an object, got ${JSON.stringify(payload)}`);
+  }
+  const { idempotencyKey, value, delayAfterEffectMs } = payload as Record<string, unknown>;
+  if (typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0) {
+    throw new InvalidTaskError(
+      `idempotent_effect payload.idempotencyKey must be a non-empty string, got ${JSON.stringify(idempotencyKey)}`,
+    );
+  }
+  if (idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+    throw new InvalidTaskError(
+      `idempotent_effect payload.idempotencyKey must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
+    );
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    throw new InvalidTaskError(`idempotent_effect payload.value must be a non-empty string, got ${JSON.stringify(value)}`);
+  }
+  if (
+    typeof delayAfterEffectMs !== "number" ||
+    !Number.isInteger(delayAfterEffectMs) ||
+    delayAfterEffectMs < 0 ||
+    delayAfterEffectMs > MAX_TASK_DELAY_MS
+  ) {
+    throw new InvalidTaskError(
+      `idempotent_effect payload.delayAfterEffectMs must be an integer in [0, ${MAX_TASK_DELAY_MS}], got ${JSON.stringify(delayAfterEffectMs)}`,
+    );
+  }
+  return { idempotencyKey, value, delayAfterEffectMs };
+}
+
+/**
+ * Applies (or reuses) one keyed side effect, then optionally waits.
+ *
+ * The delay is deliberately AFTER the effect has committed: it is what makes
+ * the interesting failure window — effect durable, step completion not yet
+ * written — reachable on purpose in tests and the demo instead of only by
+ * luck. It waits asynchronously, so lease renewal keeps running during it.
+ *
+ * The returned result is the stored effect result, whether this execution
+ * applied it or reused an earlier one. That is what makes a re-execution's
+ * step result identical to the original's, and it is why the result carries
+ * no "did I apply it" flag: that fact is local to one execution, while the
+ * step result describes the logical effect.
+ */
+async function runIdempotentEffect(payload: unknown, context: ExecutionContext): Promise<EffectOutcome["result"]> {
+  const { idempotencyKey, value, delayAfterEffectMs } = parseIdempotentEffectPayload(payload);
+  const outcome = await context.applyEffect({
+    idempotencyKey,
+    effectType: DEMO_EFFECT_TYPE,
+    request: { value },
+  });
+  await sleep(delayAfterEffectMs);
+  return outcome.result;
+}
+
 // Durable attempt input comes from the claim, never a process-local counter.
-export async function executeStep(step: { taskType: string; payload: unknown; attemptCount: number }): Promise<Record<string, unknown>> {
+// `context` is required rather than optional so a task that needs an effect
+// can never silently run without one.
+export async function executeStep(
+  step: { taskType: string; payload: unknown; attemptCount: number },
+  context: ExecutionContext,
+): Promise<Record<string, unknown>> {
   let taskType;
   try {
     taskType = parseTaskType(step.taskType);
@@ -92,5 +168,7 @@ export async function executeStep(step: { taskType: string; payload: unknown; at
       return runHashAfterDelay(step.payload);
     case "fail_then_hash":
       return failThenHash(step.payload, step.attemptCount);
+    case "idempotent_effect":
+      return runIdempotentEffect(step.payload, context);
   }
 }
