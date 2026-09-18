@@ -242,7 +242,8 @@ claims this milestone makes.
     real expiry, recovery, and reclaim, including reuse of the worker ID.
   - Fencing (this predicate) stops a stale *write*. It says nothing about
     a stale worker having already performed an external side effect
-    before losing ownership — that is idempotency's job, not built yet.
+    before losing ownership — the PostgreSQL receipt sink demonstrates
+    idempotency; arbitrary external APIs remain outside that guarantee.
 - **Ownership fields on success.** `current_worker_id` and
   `lease_expires_at` are cleared; `lease_version` is preserved, never
   reset — a terminal step has no active owner, but the ownership
@@ -673,7 +674,8 @@ durable events, and UI remain unimplemented.
   - Exactly-once execution. After recovery the same step runs again; a
     lapsed owner's executor may have finished its work too.
   - Protection for side effects performed before a lease was lost
-    (idempotency, not built).
+    (the receipt sink demonstrates idempotency; arbitrary external effects
+    remain unprotected).
   - Cancellation of an executor that has lost its lease.
   - Protection against event-loop blocking longer than the lease.
   - Milestone 5 had no bound on retries; Milestone 7 adds a total claim budget.
@@ -953,7 +955,7 @@ B executes the same task
 B requests effect K           -> existing row returned, nothing applied
 B completes                   -> SUCCEEDED v2, result = K's stored result
 A resumes (SIGCONT)
-A re-requests K               -> existing row returned, still no second effect
+A continues its original post-effect delay (no second effect call)
 A attempts completion at v1   -> rejected by fencing, no mutation
 final: 1 effect row, 1 SUCCEEDED step, 2 executions
 ```
@@ -995,13 +997,25 @@ final: 1 effect row, 1 SUCCEEDED step, 2 executions
   verbatim, including the original `effectId`. A freshly generated result is
   never returned as if it were the stored one; a caller whose insert
   conflicts discards the identifier it minted.
+- **Application-owned identity.** The executor derives exactly
+  `step:<lowercase UUID>:demo_receipt` from the claimed step's `id`. Attempts,
+  lease generations, worker IDs, and payload values never enter the key.
+  Its request JSON is `{ stepId: <lowercase UUID>, value }`, preserving logical
+  identity in the sink without another schema column. Different steps with
+  identical payloads get different keys. Re-executions of one step get the
+  same key. The low-level sink still accepts a key; the application chooses
+  it, not the task payload. Payload-supplied `idempotencyKey` is now invalid
+  input and dead-letters without applying an effect.
+  Existing legacy receipt rows are retained unchanged. This is a payload
+  contract change, not a backfill: legacy terminal steps are not replayed.
+  Do not manually reset a legacy keyed step for replay under the new contract.
 - **Key reuse is rejected, not absorbed.** The same key with a different
   `effect_type` or a different `request` throws instead of returning the
   earlier result, so an accidentally reused key surfaces as an error rather
   than as a plausible-looking wrong value. Requests are compared with
   PostgreSQL `jsonb` equality, so property order alone is not a conflict.
 - **Task type** `idempotent_effect`, payload
-  `{ idempotencyKey, value, delayAfterEffectMs }`. It applies or reuses the
+  `{ value, delayAfterEffectMs }`. It applies or reuses the
   effect, waits `delayAfterEffectMs`, and returns the stored effect result,
   which the worker's ordinary completion persists as the step result. The
   delay exists only to make the failure window (effect durable, completion
@@ -1025,12 +1039,14 @@ final: 1 effect row, 1 SUCCEEDED step, 2 executions
   effect committed, process lost, completion never written. Nothing in the
   retry/recovery path compensates for that window — the idempotency key is
   what makes it safe.
-- **Honest limitation of the simulation.** A real external effect would be
-  performed between the insert and its commit, so a crash there could leave
-  an effect performed with no row recorded, or a row recorded for an effect
-  that never happened. This store has no such gap because the row is the
-  effect. The contract demonstrated is the one a real API must offer for a
-  retried step to be safe; nothing here makes an arbitrary API idempotent.
+- **Honest limitation of the simulation.** Calling an arbitrary third-party
+  API before or after this insert, even from inside a PostgreSQL transaction,
+  could leave one system committed and the other uncommitted. This store has
+  no such gap because the row is the effect. A real API needs its own durable
+  idempotency contract; this sink does not confer one on arbitrary APIs.
+  The sink does not authorize workflow ownership: a stale executor can still
+  call it, including making the first application if no receipt exists yet.
+  Fencing controls step state, not cancellation or external computation.
 - **Tests.**
   - `idempotent-effects.test.ts`: first application (one row, generated
     identifier, `created_at` bracketed by database-clock readings); repeats
@@ -1039,41 +1055,60 @@ final: 1 effect row, 1 SUCCEEDED step, 2 executions
     equality ignores property order; different keys independent; blank and
     over-long keys rejected; and 12 concurrent callers on independent
     connections producing exactly one row, exactly one `applied: true`, and
-    one distinct `effectId` observed by every caller.
+    one distinct `effectId` observed by every caller. Direct duplicate SQL is
+    rejected by the primary key. An explicit rollback removes both receipt
+    and idempotency record because they are one row. Callers blocked behind
+    uncommitted inserts handle both commit and rollback on separate connections.
   - `idempotency.test.ts`: the real worker loop freezing past its lease after
     its effect committed, then recovering and re-executing to `SUCCEEDED` at
     `lease_version` 2 / `attempt_count` 2 with the original effect result;
-    the stale-generation sequence where the old generation re-requests the
-    effect (no second effect) and its completion is fenced off while the v2
-    row stays byte-for-byte unchanged; and a re-execution producing the same
-    result as the execution that applied the effect. These use the **same
-    worker ID** across generations, so `lease_version` is the term that
-    distinguishes stale ownership.
-  - `execute-step.test.ts`: the task asks for the payload's key, returns the
-    stored result whether applied or reused, delays only after the effect
-    layer returns, rejects malformed payloads without calling the effect
-    layer, and surfaces an effect-layer rejection as an ordinary retryable
-    failure.
+    same-ID stale completion and failure reports rejected while v2 is live
+    and RUNNING (version alone distinguishes them); separate steps with
+    identical payloads get independent effects; post-effect reported failures
+    consume exactly three attempts before dead-lettering; last-attempt crash
+    recovery may dead-letter even though the effect exists; and invalid input
+    dead-letters immediately with no effect. Whole-row snapshots establish
+    that stale writes make no durable step mutation.
+  - `execute-step.test.ts`: keys are step-derived and stable across attempts,
+    canonicalize UUID casing, reject payload-owned keys, and return the
+    stored result whether applied or reused. Tests also check the post-effect
+    delay, malformed payload rejection before calling the effect layer, and
+    ordinary retryable failures from that layer.
   - Checked against deliberately broken versions, each restored: treating a
     duplicate key as a fresh effect (`DO UPDATE` overwriting the stored
     result), never comparing the stored request/type, returning a newly
     minted result on a duplicate, and replacing the insert with an
     unprotected `SELECT`-then-`INSERT` (caught by the concurrency test).
 - **Demo** (`npm run demo:idempotency`). Real child processes, production
-  timings, ~45s. The SIGSTOP trigger is the effect row appearing in
+  timings (duration depends on database/process scheduling). The SIGSTOP
+  trigger is the effect row appearing in
   PostgreSQL rather than a log line — the durable effect is what the
   orchestration waits for. Every claim asserts durable state; logs are
   evidence of what each process did, never coordination. Each run uses a
-  fresh key so a rerun applies a genuinely new effect.
+  fresh step UUID and therefore a fresh key. The effect query also selects by
+  request step identity to detect duplicates even if key derivation breaks.
+  Captured v1 completion and failure probes are rejected while B is live;
+  the resumed A process later attempts its own stale completion and loses.
+  `npm run demo:idempotency -- --kill` instead SIGKILLs the actual Node PID
+  after the receipt commits. B recovers/re-executes and reuses it; a killed
+  process cannot resume, so that mode uses captured stale-write probes only.
+- **Attempt budget is independent.** Every successful claim still increments
+  both `attempt_count` and `lease_version`. Reusing a receipt does not refund
+  an attempt, complete the step implicitly, or make a terminal row claimable.
+  A final-attempt crash can leave a durable receipt alongside a DEAD_LETTERED
+  step with a null workflow result. At-most-once effects do not guarantee
+  eventual workflow success.
 - **What this does and does not license saying.** With this milestone:
   *at-least-once execution with idempotent side-effect handling*. Not:
   exactly-once execution, exactly-once external side effects in general,
   that arbitrary APIs become idempotent, that PostgreSQL fencing prevents
   external duplicate effects, or anything involving distributed
-  transactions.
-- **Deliberately absent.** Idempotency expiry or garbage collection, keys
-  derived automatically from step identity, effect history beyond the single
-  stored row, an outbox, sagas, or any second effect type.
+  transactions, cancellation of stale computation, or execution-time guarantees.
+  At-most-once receipt creation depends on retaining the unique key/row and
+  keeping a logical step UUID stable and unreused. The controlled sink is
+  PostgreSQL, not an arbitrary third-party API.
+- **Deliberately absent.** Idempotency expiry or garbage collection,
+  effect history beyond the single stored row, an outbox, sagas, or any second effect type.
 
 ### Verification
 

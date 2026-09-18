@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { parseTaskType } from "../domain/task-type.js";
-import { DEMO_EFFECT_TYPE, MAX_IDEMPOTENCY_KEY_LENGTH, type EffectOutcome, type EffectRequest } from "../db/idempotent-effect.js";
+import { DEMO_EFFECT_TYPE, type EffectOutcome, type EffectRequest } from "../db/idempotent-effect.js";
 
 // One distinction: unchanged invalid input cannot improve on a retry.
 // Ordinary exceptions from a validated task remain retryable.
@@ -33,7 +33,6 @@ export interface ExecutionContext {
 }
 
 export interface IdempotentEffectPayload {
-  idempotencyKey: string;
   value: string;
   delayAfterEffectMs: number;
 }
@@ -95,16 +94,9 @@ function parseIdempotentEffectPayload(payload: unknown): IdempotentEffectPayload
   if (typeof payload !== "object" || payload === null) {
     throw new InvalidTaskError(`idempotent_effect payload must be an object, got ${JSON.stringify(payload)}`);
   }
-  const { idempotencyKey, value, delayAfterEffectMs } = payload as Record<string, unknown>;
-  if (typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0) {
-    throw new InvalidTaskError(
-      `idempotent_effect payload.idempotencyKey must be a non-empty string, got ${JSON.stringify(idempotencyKey)}`,
-    );
-  }
-  if (idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
-    throw new InvalidTaskError(
-      `idempotent_effect payload.idempotencyKey must be at most ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
-    );
+  const { value, delayAfterEffectMs } = payload as Record<string, unknown>;
+  if ("idempotencyKey" in payload) {
+    throw new InvalidTaskError("idempotent_effect keys are application-owned; omit payload.idempotencyKey");
   }
   if (typeof value !== "string" || value.length === 0) {
     throw new InvalidTaskError(`idempotent_effect payload.value must be a non-empty string, got ${JSON.stringify(value)}`);
@@ -119,7 +111,16 @@ function parseIdempotentEffectPayload(payload: unknown): IdempotentEffectPayload
       `idempotent_effect payload.delayAfterEffectMs must be an integer in [0, ${MAX_TASK_DELAY_MS}], got ${JSON.stringify(delayAfterEffectMs)}`,
     );
   }
-  return { idempotencyKey, value, delayAfterEffectMs };
+  return { value, delayAfterEffectMs };
+}
+
+// One logical receipt per step. Neither attempts nor ownership generations
+// participate. PostgreSQL UUID identity is case-insensitive; canonicalize it.
+export function stepEffectKey(stepId: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stepId)) {
+    throw new InvalidTaskError("idempotent_effect requires a UUID step identity");
+  }
+  return `step:${stepId.toLowerCase()}:demo_receipt`;
 }
 
 /**
@@ -136,12 +137,12 @@ function parseIdempotentEffectPayload(payload: unknown): IdempotentEffectPayload
  * no "did I apply it" flag: that fact is local to one execution, while the
  * step result describes the logical effect.
  */
-async function runIdempotentEffect(payload: unknown, context: ExecutionContext): Promise<EffectOutcome["result"]> {
-  const { idempotencyKey, value, delayAfterEffectMs } = parseIdempotentEffectPayload(payload);
+async function runIdempotentEffect(stepId: string, payload: unknown, context: ExecutionContext): Promise<EffectOutcome["result"]> {
+  const { value, delayAfterEffectMs } = parseIdempotentEffectPayload(payload);
   const outcome = await context.applyEffect({
-    idempotencyKey,
+    idempotencyKey: stepEffectKey(stepId),
     effectType: DEMO_EFFECT_TYPE,
-    request: { value },
+    request: { stepId: stepId.toLowerCase(), value },
   });
   await sleep(delayAfterEffectMs);
   return outcome.result;
@@ -151,7 +152,7 @@ async function runIdempotentEffect(payload: unknown, context: ExecutionContext):
 // `context` is required rather than optional so a task that needs an effect
 // can never silently run without one.
 export async function executeStep(
-  step: { taskType: string; payload: unknown; attemptCount: number },
+  step: { id: string; taskType: string; payload: unknown; attemptCount: number },
   context: ExecutionContext,
 ): Promise<Record<string, unknown>> {
   let taskType;
@@ -169,6 +170,6 @@ export async function executeStep(
     case "fail_then_hash":
       return failThenHash(step.payload, step.attemptCount);
     case "idempotent_effect":
-      return runIdempotentEffect(step.payload, context);
+      return runIdempotentEffect(step.id, step.payload, context);
   }
 }

@@ -5,8 +5,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { claimNextStep } from "../src/db/claim-step.js";
 import { CompletionConsistencyError, completeStepSuccess } from "../src/db/complete-step.js";
 import { applyIdempotentEffect, type EffectResult } from "../src/db/idempotent-effect.js";
+import { recordStepFailure } from "../src/db/record-step-failure.js";
+import { promoteDueRetries } from "../src/db/promote-due-retries.js";
 import { recoverExpiredSteps } from "../src/db/recover-expired-steps.js";
-import { executeStep, type ExecutionContext } from "../src/worker/execute-step.js";
+import { executeStep, stepEffectKey, type ExecutionContext } from "../src/worker/execute-step.js";
 import { runWorkerLoop } from "../src/worker/worker-loop.js";
 
 // The point of the milestone: a step can execute more than once, while the
@@ -59,12 +61,11 @@ async function effectRows(key: string): Promise<Array<{ result: EffectResult; cr
   return result.rows;
 }
 
-async function insertEffectStep(key: string, delayAfterEffectMs: number): Promise<string> {
-  const id = randomUUID();
+async function insertEffectStep(id: string, delayAfterEffectMs: number): Promise<string> {
   await admin.query(
     `insert into steps (id, status, priority, task_type, payload)
      values ($1, 'READY', 0, 'idempotent_effect', $2::jsonb)`,
-    [id, JSON.stringify({ idempotencyKey: key, value: "receipt-created", delayAfterEffectMs })],
+    [id, JSON.stringify({ value: "receipt-created", delayAfterEffectMs })],
   );
   return id;
 }
@@ -106,8 +107,9 @@ beforeEach(async () => {
 
 describe("effect committed, completion lost, step re-executed", () => {
   it("re-executes through the real worker loop after a freeze, reusing the one effect and completing at the next generation", async () => {
-    const key = `crash-${randomUUID()}`;
-    const id = await insertEffectStep(key, 800);
+    const id = randomUUID();
+    const key = stepEffectKey(id);
+    await insertEffectStep(id, 800);
     const pool = new Pool({ connectionString, max: 1 });
     const controller = new AbortController();
     const logs: string[] = [];
@@ -179,9 +181,10 @@ describe("effect committed, completion lost, step re-executed", () => {
 });
 
 describe("stale generation after reclaim", () => {
-  it("the old generation's re-request returns the stored effect and its completion is fenced off", async () => {
-    const key = `stale-${randomUUID()}`;
-    const id = await insertEffectStep(key, 0);
+  it.each(["completion", "retry", "dead-letter"])("same-ID post-effect stale %s is fenced while v2 is live", async (operation) => {
+    const id = randomUUID();
+    const key = stepEffectKey(id);
+    await insertEffectStep(id, 0);
     // Two independent connections, one application-level worker ID: A and B
     // are different process lifetimes using the same name.
     const poolA = new Pool({ connectionString, max: 1 });
@@ -220,39 +223,42 @@ describe("stale generation after reclaim", () => {
       expect(resultB).toEqual(resultA);
       expect(await effectRows(key)).toEqual([applied]);
 
-      await completeStepSuccess(dbB, {
-        id,
-        workerId: WORKER_ID,
-        leaseVersion: claimB.step.leaseVersion,
-        result: resultB,
+      const liveV2 = await snapshotStep(id);
+      expect(await readStep(id)).toMatchObject({
+        status: "RUNNING", current_worker_id: WORKER_ID, expired: false,
+        lease_version: 2, attempt_count: 2,
       });
-      const completedV2 = await snapshotStep(id);
-      expect(await readStep(id)).toMatchObject({ status: "SUCCEEDED", lease_version: 2, attempt_count: 2 });
 
       // A resumes. Its re-request finds the effect already applied...
       const reRequest = await applyIdempotentEffect(dbA, {
         idempotencyKey: key,
         effectType: "demo_receipt",
-        request: { value: "receipt-created" },
+        request: { stepId: id, value: "receipt-created" },
       });
       expect(reRequest.applied).toBe(false);
       expect(reRequest.result).toEqual(applied.result);
       expect(await effectRows(key)).toEqual([applied]);
 
-      // ...and its completion is rejected: same worker ID, same result, but
-      // lease_version 1 is no longer the current generation.
-      await expect(
-        completeStepSuccess(dbA, {
-          id,
-          workerId: WORKER_ID,
-          leaseVersion: claimA.step.leaseVersion,
-          result: resultA,
-        }),
-      ).rejects.toBeInstanceOf(CompletionConsistencyError);
-
-      // Idempotency protected the effect; fencing protected the step row.
-      expect(await snapshotStep(id)).toEqual(completedV2);
+      // Every authorization term except generation matches: same ID, live
+      // RUNNING successor. This cannot pass just because v2 is terminal.
+      if (operation === "completion") {
+        await expect(completeStepSuccess(dbA, {
+          id, workerId: WORKER_ID, leaseVersion: 1, result: resultA,
+        })).rejects.toBeInstanceOf(CompletionConsistencyError);
+      } else {
+        expect(await recordStepFailure(dbA, {
+          id, workerId: WORKER_ID, leaseVersion: 1,
+          error: "stale post-effect error", retryable: operation === "retry",
+        })).toEqual({ recorded: false });
+      }
+      expect(await snapshotStep(id)).toEqual(liveV2);
       expect(await effectRows(key)).toEqual([applied]);
+      await completeStepSuccess(dbB, {
+        id, workerId: WORKER_ID, leaseVersion: 2, result: resultB,
+      });
+      expect(await readStep(id)).toMatchObject({
+        status: "SUCCEEDED", lease_version: 2, attempt_count: 2, result: resultA,
+      });
     } finally {
       await poolA.end();
       await poolB.end();
@@ -260,8 +266,9 @@ describe("stale generation after reclaim", () => {
   }, 30_000);
 
   it("a re-execution after recovery produces the same step result as the execution that applied the effect", async () => {
-    const key = `reexec-${randomUUID()}`;
-    const id = await insertEffectStep(key, 0);
+    const id = randomUUID();
+    const key = stepEffectKey(id);
+    await insertEffectStep(id, 0);
     const pool = new Pool({ connectionString, max: 1 });
     const db = drizzle(pool);
 
@@ -288,4 +295,90 @@ describe("stale generation after reclaim", () => {
       await pool.end();
     }
   }, 20_000);
+});
+
+
+describe("step identity and retry policy around effects", () => {
+  it("different steps with identical payloads cannot share an effect", async () => {
+    const db = drizzle(admin);
+    const ids = [randomUUID(), randomUUID()];
+    const results: unknown[] = [];
+    for (const id of ids) {
+      await insertEffectStep(id, 0);
+      const claim = await claimNextStep(db, WORKER_ID);
+      if (!claim.claimed) throw new Error("claim failed");
+      results.push(await executeStep(claim.step, contextFor(db)));
+      expect(await effectRows(stepEffectKey(id))).toHaveLength(1);
+    }
+    expect(results[0]).not.toEqual(results[1]);
+    expect((await admin.query("select count(*)::int as n from idempotent_effects")).rows[0].n).toBe(2);
+  });
+
+  it("post-effect reported failures still consume exactly three attempts then dead-letter", async () => {
+    const db = drizzle(admin);
+    const id = randomUUID();
+    await insertEffectStep(id, 0);
+    let original: unknown;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const claim = await claimNextStep(db, WORKER_ID);
+      if (!claim.claimed) throw new Error("claim failed");
+      expect(claim.step).toMatchObject({ id, attemptCount: attempt, leaseVersion: attempt });
+      // Models a valid executor whose effect commits and then throws.
+      const result = await executeStep(claim.step, contextFor(db));
+      if (attempt === 1) original = result;
+      expect(result).toEqual(original);
+      expect(await recordStepFailure(db, {
+        id, workerId: WORKER_ID, leaseVersion: attempt, error: "failure after effect", retryable: true,
+      })).toMatchObject({ recorded: true, status: attempt < 3 ? "RETRY_WAIT" : "DEAD_LETTERED",
+        attemptCount: attempt, leaseVersion: attempt });
+      if (attempt < 3) {
+        await waitUntil(async () => (await admin.query(
+          "select available_at <= clock_timestamp() as due from steps where id = $1", [id],
+        )).rows[0].due, 5_000, "retry never due");
+        expect(await promoteDueRetries(db)).toEqual([{ id, leaseVersion: attempt, attemptCount: attempt }]);
+      }
+    }
+    expect(await effectRows(stepEffectKey(id))).toHaveLength(1);
+    expect(await readStep(id)).toMatchObject({ status: "DEAD_LETTERED", attempt_count: 3, lease_version: 3, result: null });
+    expect(await promoteDueRetries(db)).toEqual([]);
+    expect(await recoverExpiredSteps(db)).toEqual([]);
+    expect(await claimNextStep(db, WORKER_ID)).toEqual({ claimed: false });
+  });
+
+  it("an effect on the last crashed attempt remains durable even when recovery dead-letters", async () => {
+    const db = drizzle(admin);
+    const id = randomUUID();
+    await insertEffectStep(id, 0);
+    await admin.query("update steps set max_attempts = 1 where id = $1", [id]);
+    const claim = await claimNextStep(db, WORKER_ID, { leaseDurationMs: 150 });
+    if (!claim.claimed) throw new Error("claim failed");
+    const result = await executeStep(claim.step, contextFor(db));
+    await waitUntil(async () => (await readStep(id)).expired === true, 5_000, "lease never expired");
+    expect(await recoverExpiredSteps(db)).toEqual([{ id, leaseVersion: 1, status: "DEAD_LETTERED" }]);
+    expect(await claimNextStep(db, WORKER_ID)).toEqual({ claimed: false });
+    expect(await effectRows(stepEffectKey(id))).toMatchObject([{ result }]);
+    expect(await readStep(id)).toMatchObject({ status: "DEAD_LETTERED", attempt_count: 1, result: null });
+  });
+
+  it.each([
+    ["idempotent_effect", { value: "", delayAfterEffectMs: 0 }],
+    ["idempotent_effect", { idempotencyKey: "caller-key", value: "v", delayAfterEffectMs: 0 }],
+    ["unsupported", { value: "v", delayAfterEffectMs: 0 }],
+  ])("invalid %s input dead-letters on the first attempt without an effect", async (taskType, payload) => {
+    const id = randomUUID();
+    await admin.query("insert into steps (id, status, task_type, payload) values ($1, 'READY', $2, $3)",
+      [id, taskType, JSON.stringify(payload)]);
+    const controller = new AbortController();
+    const loop = runWorkerLoop(drizzle(admin), WORKER_ID, {
+      signal: controller.signal, pollIntervalMs: 10, log: () => {}, logError: () => {},
+    });
+    try {
+      await waitUntil(async () => (await readStep(id)).status === "DEAD_LETTERED", 5_000, "invalid task not rejected");
+      expect(await readStep(id)).toMatchObject({ attempt_count: 1, lease_version: 1, result: null });
+      expect((await admin.query("select count(*)::int as n from idempotent_effects")).rows[0].n).toBe(0);
+    } finally {
+      controller.abort();
+      await loop;
+    }
+  });
 });

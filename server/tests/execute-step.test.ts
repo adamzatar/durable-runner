@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { MAX_TASK_DELAY_MS, executeStep, InvalidTaskError, type ExecutionContext } from "../src/worker/execute-step.js";
-import { DEMO_EFFECT_TYPE, MAX_IDEMPOTENCY_KEY_LENGTH, type EffectOutcome, type EffectRequest } from "../src/db/idempotent-effect.js";
+import { MAX_TASK_DELAY_MS, executeStep, stepEffectKey, InvalidTaskError, type ExecutionContext } from "../src/worker/execute-step.js";
+import { DEMO_EFFECT_TYPE, type EffectOutcome, type EffectRequest } from "../src/db/idempotent-effect.js";
 
 // Pure tasks get a context that fails if touched: reaching the effect store
 // from hash_after_delay or fail_then_hash would be a defect, not a detail.
+const id = randomUUID();
 const noEffects: ExecutionContext = {
   applyEffect: async () => {
     throw new Error("this task must not touch the effect store");
@@ -33,18 +34,18 @@ describe("executeStep", () => {
   it("fail_then_hash uses durable attempt count: two runtime failures, then deterministic success", async () => {
     const payload = { input: "hello", failuresBeforeSuccess: 2 };
     for (const attemptCount of [1, 2]) {
-      const error = await executeStep({ taskType: "fail_then_hash", payload, attemptCount }, noEffects).catch((e: unknown) => e);
+      const error = await executeStep({ id, taskType: "fail_then_hash", payload, attemptCount }, noEffects).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect(error).not.toBeInstanceOf(InvalidTaskError);
       expect((error as Error).message).toContain(`attempt ${attemptCount}`);
     }
     const expected = { hash: createHash("sha256").update("hello").digest("hex") };
-    expect(await executeStep({ taskType: "fail_then_hash", payload, attemptCount: 3 }, noEffects)).toEqual(expected);
-    expect(await executeStep({ taskType: "fail_then_hash", payload, attemptCount: 3 }, noEffects)).toEqual(expected);
+    expect(await executeStep({ id, taskType: "fail_then_hash", payload, attemptCount: 3 }, noEffects)).toEqual(expected);
+    expect(await executeStep({ id, taskType: "fail_then_hash", payload, attemptCount: 3 }, noEffects)).toEqual(expected);
   });
 
   it("fail_then_hash poison input still fails on the final permitted attempt", async () => {
-    await expect(executeStep({ taskType: "fail_then_hash", attemptCount: 3,
+    await expect(executeStep({ id, taskType: "fail_then_hash", attemptCount: 3,
       payload: { input: "hello", failuresBeforeSuccess: 99 } }, noEffects)).rejects.toThrow(/attempt 3/);
   });
 
@@ -52,18 +53,18 @@ describe("executeStep", () => {
     for (const payload of [null, {}, { input: "", failuresBeforeSuccess: 1 },
       { input: "hello", failuresBeforeSuccess: -1 }, { input: "hello", failuresBeforeSuccess: 1.5 },
       { input: "hello", failuresBeforeSuccess: "2" }]) {
-      await expect(executeStep({ taskType: "fail_then_hash", payload, attemptCount: 1 }, noEffects)).rejects.toBeInstanceOf(InvalidTaskError);
+      await expect(executeStep({ id, taskType: "fail_then_hash", payload, attemptCount: 1 }, noEffects)).rejects.toBeInstanceOf(InvalidTaskError);
     }
-    await expect(executeStep({ taskType: "unknown", payload: {}, attemptCount: 1 }, noEffects)).rejects.toBeInstanceOf(InvalidTaskError);
-    await expect(executeStep({ taskType: "hash_after_delay", payload: {}, attemptCount: 1 }, noEffects)).rejects.toBeInstanceOf(InvalidTaskError);
+    await expect(executeStep({ id, taskType: "unknown", payload: {}, attemptCount: 1 }, noEffects)).rejects.toBeInstanceOf(InvalidTaskError);
+    await expect(executeStep({ id, taskType: "hash_after_delay", payload: {}, attemptCount: 1 }, noEffects)).rejects.toBeInstanceOf(InvalidTaskError);
   });
 
   describe("hash_after_delay", () => {
     it("produces the sha256 hex digest of the input, deterministically", async () => {
       const expected = createHash("sha256").update("abc").digest("hex");
 
-      const first = await executeStep({ attemptCount: 1, taskType: "hash_after_delay", payload: { input: "abc", delayMs: 0 } }, noEffects);
-      const second = await executeStep({ attemptCount: 1, taskType: "hash_after_delay", payload: { input: "abc", delayMs: 0 } }, noEffects);
+      const first = await executeStep({ id, attemptCount: 1, taskType: "hash_after_delay", payload: { input: "abc", delayMs: 0 } }, noEffects);
+      const second = await executeStep({ id, attemptCount: 1, taskType: "hash_after_delay", payload: { input: "abc", delayMs: 0 } }, noEffects);
 
       expect(first).toEqual({ hash: expected });
       expect(second).toEqual({ hash: expected });
@@ -71,28 +72,29 @@ describe("executeStep", () => {
 
     it("actually waits delayMs before resolving", async () => {
       const start = Date.now();
-      await executeStep({ attemptCount: 1, taskType: "hash_after_delay", payload: { input: "x", delayMs: 50 } }, noEffects);
+      await executeStep({ id, attemptCount: 1, taskType: "hash_after_delay", payload: { input: "x", delayMs: 50 } }, noEffects);
       expect(Date.now() - start).toBeGreaterThanOrEqual(45);
     });
 
     it("rejects a missing or empty input", async () => {
       await expect(
-        executeStep({ attemptCount: 1, taskType: "hash_after_delay", payload: { delayMs: 0 } }, noEffects),
+        executeStep({ id, attemptCount: 1, taskType: "hash_after_delay", payload: { delayMs: 0 } }, noEffects),
       ).rejects.toThrow(/input/);
       await expect(
-        executeStep({ attemptCount: 1, taskType: "hash_after_delay", payload: { input: "", delayMs: 0 } }, noEffects),
+        executeStep({ id, attemptCount: 1, taskType: "hash_after_delay", payload: { input: "", delayMs: 0 } }, noEffects),
       ).rejects.toThrow(/input/);
     });
 
     it("rejects a negative, non-integer, or too-large delayMs", async () => {
       await expect(
-        executeStep({ attemptCount: 1, taskType: "hash_after_delay", payload: { input: "x", delayMs: -1 } }, noEffects),
+        executeStep({ id, attemptCount: 1, taskType: "hash_after_delay", payload: { input: "x", delayMs: -1 } }, noEffects),
       ).rejects.toThrow(/delayMs/);
       await expect(
-        executeStep({ attemptCount: 1, taskType: "hash_after_delay", payload: { input: "x", delayMs: 1.5 } }, noEffects),
+        executeStep({ id, attemptCount: 1, taskType: "hash_after_delay", payload: { input: "x", delayMs: 1.5 } }, noEffects),
       ).rejects.toThrow(/delayMs/);
       await expect(
         executeStep({
+          id,
           attemptCount: 1,
           taskType: "hash_after_delay",
           payload: { input: "x", delayMs: MAX_TASK_DELAY_MS + 1 },
@@ -101,35 +103,46 @@ describe("executeStep", () => {
     });
 
     it("rejects a non-object payload", async () => {
-      await expect(executeStep({ attemptCount: 1, taskType: "hash_after_delay", payload: null }, noEffects)).rejects.toThrow();
-      await expect(executeStep({ attemptCount: 1, taskType: "hash_after_delay", payload: "abc" }, noEffects)).rejects.toThrow();
+      await expect(executeStep({ id, attemptCount: 1, taskType: "hash_after_delay", payload: null }, noEffects)).rejects.toThrow();
+      await expect(executeStep({ id, attemptCount: 1, taskType: "hash_after_delay", payload: "abc" }, noEffects)).rejects.toThrow();
     });
   });
 
   describe("idempotent_effect", () => {
-    const payload = { idempotencyKey: "task-key", value: "receipt-created", delayAfterEffectMs: 0 };
+    const payload = { value: "receipt-created", delayAfterEffectMs: 0 };
 
-    it("asks the effect layer for the payload's key and returns the stored result verbatim", async () => {
+    it("derives the key from the step identity and returns the stored result verbatim", async () => {
       const context = recordingContext({ applied: true, result: { effectId: "abc-123", value: "receipt-created" } });
 
-      const result = await executeStep({ attemptCount: 1, taskType: "idempotent_effect", payload }, context);
+      const result = await executeStep({ id, attemptCount: 1, taskType: "idempotent_effect", payload }, context);
 
       expect(context.calls).toEqual([
-        { idempotencyKey: "task-key", effectType: DEMO_EFFECT_TYPE, request: { value: "receipt-created" } },
+        { idempotencyKey: stepEffectKey(id), effectType: DEMO_EFFECT_TYPE, request: { stepId: id, value: "receipt-created" } },
       ]);
       expect(result).toEqual({ effectId: "abc-123", value: "receipt-created" });
+    });
+
+    it("uses the same canonical step key across attempts and rejects payload-owned keys", async () => {
+      const context = recordingContext();
+      for (const attemptCount of [1, 2, 3]) {
+        await executeStep({ id, attemptCount, taskType: "idempotent_effect", payload }, context);
+      }
+      expect(context.calls.map((call) => call.idempotencyKey)).toEqual(Array(3).fill(`step:${id}:demo_receipt`));
+      expect(stepEffectKey(id.toUpperCase())).toBe(stepEffectKey(id));
+      await expect(executeStep({ id, attemptCount: 1, taskType: "idempotent_effect",
+        payload: { ...payload, idempotencyKey: "chosen-by-payload" } }, context)).rejects.toBeInstanceOf(InvalidTaskError);
     });
 
     it("returns the same result whether this execution applied the effect or reused it", async () => {
       const stored = { effectId: "original-id", value: "receipt-created" };
       const applied = await executeStep(
-        { attemptCount: 1, taskType: "idempotent_effect", payload },
+        { id, attemptCount: 1, taskType: "idempotent_effect", payload },
         recordingContext({ applied: true, result: stored }),
       );
       // A re-execution after recovery sees applied: false and must still
       // produce the identical step result, including the original effectId.
       const reused = await executeStep(
-        { attemptCount: 2, taskType: "idempotent_effect", payload },
+        { id, attemptCount: 2, taskType: "idempotent_effect", payload },
         recordingContext({ applied: false, result: stored }),
       );
 
@@ -148,7 +161,7 @@ describe("executeStep", () => {
 
       const start = Date.now();
       await executeStep(
-        { attemptCount: 1, taskType: "idempotent_effect", payload: { ...payload, delayAfterEffectMs: 120 } },
+        { id, attemptCount: 1, taskType: "idempotent_effect", payload: { ...payload, delayAfterEffectMs: 120 } },
         context,
       );
       const finished = Date.now();
@@ -168,16 +181,16 @@ describe("executeStep", () => {
         {},
         { idempotencyKey: "", value: "v", delayAfterEffectMs: 0 },
         { idempotencyKey: "   ", value: "v", delayAfterEffectMs: 0 },
-        { idempotencyKey: "k", value: "", delayAfterEffectMs: 0 },
-        { idempotencyKey: "k", value: 7, delayAfterEffectMs: 0 },
-        { idempotencyKey: "k", value: "v", delayAfterEffectMs: -1 },
-        { idempotencyKey: "k", value: "v", delayAfterEffectMs: 1.5 },
-        { idempotencyKey: "k", value: "v", delayAfterEffectMs: MAX_TASK_DELAY_MS + 1 },
-        { idempotencyKey: "k", value: "v" },
-        { idempotencyKey: "x".repeat(MAX_IDEMPOTENCY_KEY_LENGTH + 1), value: "v", delayAfterEffectMs: 0 },
+        { value: "", delayAfterEffectMs: 0 },
+        { value: 7, delayAfterEffectMs: 0 },
+        { value: "v", delayAfterEffectMs: -1 },
+        { value: "v", delayAfterEffectMs: 1.5 },
+        { value: "v", delayAfterEffectMs: MAX_TASK_DELAY_MS + 1 },
+        { value: "v" },
+        { idempotencyKey: "x".repeat(201), value: "v", delayAfterEffectMs: 0 },
       ]) {
         await expect(
-          executeStep({ attemptCount: 1, taskType: "idempotent_effect", payload: bad }, context),
+          executeStep({ id, attemptCount: 1, taskType: "idempotent_effect", payload: bad }, context),
         ).rejects.toBeInstanceOf(InvalidTaskError);
       }
       // Invalid input dead-letters immediately; no effect may be applied on
@@ -193,7 +206,7 @@ describe("executeStep", () => {
       };
 
       const error = await executeStep(
-        { attemptCount: 1, taskType: "idempotent_effect", payload },
+        { id, attemptCount: 1, taskType: "idempotent_effect", payload },
         context,
       ).catch((e: unknown) => e);
 
@@ -206,7 +219,7 @@ describe("executeStep", () => {
 
   it("rejects an unsupported task type", async () => {
     await expect(
-      executeStep({ attemptCount: 1, taskType: "does_not_exist", payload: {} }, noEffects),
+      executeStep({ id, attemptCount: 1, taskType: "does_not_exist", payload: {} }, noEffects),
     ).rejects.toThrow(/does_not_exist/);
   });
 });

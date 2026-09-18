@@ -26,8 +26,8 @@ export interface EffectResult extends Record<string, unknown> {
 export interface EffectOutcome {
   // Describes THIS call, not the logical effect: true means this caller's
   // INSERT created the row, false means the effect already existed and its
-  // stored result was returned unchanged. The logical effect happened
-  // exactly once either way.
+  // stored result was returned unchanged. The primary key permits at most
+  // one durable row per key.
   applied: boolean;
   result: EffectResult;
   createdAt: string;
@@ -103,13 +103,11 @@ type ExistingRow = { result: EffectResult; created_at: string; matches: boolean 
  * - It also keeps this write off the critical path of a step row lock; the
  *   effect store is a separate durable boundary, not part of step state.
  *
- * SIDE EFFECT ORDERING, stated honestly: a real external effect would be
- * performed here, between the insert and its commit, and a crash in that
- * window could leave an effect performed with no row recorded, or a row
- * recorded for an effect that never happened. This simulated store has no
- * such gap because the row IS the effect. Nothing here makes an arbitrary
- * external API idempotent; it demonstrates the contract an API must offer
- * for a retried step to be safe.
+ * The row IS the effect, so its insert atomically records and applies it.
+ * Calling an arbitrary third-party API before or after this insert (even
+ * inside a PostgreSQL transaction) would introduce a gap: one system can
+ * commit while the other does not. This sink does not solve that gap; a
+ * retried external API needs its own durable idempotency contract.
  */
 export async function applyIdempotentEffect<TSchema extends Record<string, unknown>>(
   db: NodePgDatabase<TSchema>,

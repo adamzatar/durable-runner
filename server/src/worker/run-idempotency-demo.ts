@@ -6,6 +6,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { stepEffectKey } from "./execute-step.js";
+import { completeStepSuccess, CompletionConsistencyError } from "../db/complete-step.js";
+import { recordStepFailure } from "../db/record-step-failure.js";
 
 // Milestone 8: the side effect happens once, the step executes twice.
 //
@@ -22,8 +26,9 @@ import { Pool } from "pg";
 // Logs are evidence of what each process did; all shared state and every
 // expiry decision come from the database. No worker IPC.
 //
-// Each run uses a fresh idempotency key, so a rerun genuinely applies a new
-// effect rather than quietly reusing the previous run's row.
+// Each run has a fresh step UUID and therefore a fresh application-owned
+// key. --kill exercises actual death instead of a resumable freeze. A killed
+// worker cannot resume; that mode probes stale writes using its captured v1.
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is not set");
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, statement_timeout: 5_000 });
 const workerScript = fileURLToPath(new URL("./worker.ts", import.meta.url));
@@ -36,6 +41,7 @@ interface Child {
   exited: boolean;
   done: Promise<void>;
   error?: Error;
+  expectedKill?: boolean;
 }
 const children: Child[] = [];
 let interrupted = false;
@@ -70,7 +76,7 @@ async function waitFor(label: string, check: () => Promise<boolean>, timeoutMs =
     if (interrupted) throw new Error("demo interrupted");
     for (const child of children) {
       if (child.error) throw child.error;
-      if (child.exited) throw new Error(`child ${child.process.pid} exited unexpectedly`);
+      if (child.exited && !child.expectedKill) throw new Error(`child ${child.process.pid} exited unexpectedly`);
     }
     if (await check()) return;
     if (Date.now() >= watchdog) throw new Error(`timed out: ${label}`);
@@ -95,13 +101,14 @@ interface Sample {
 interface EffectRow {
   idempotency_key: string;
   effect_type: string;
-  request: { value: string };
+  request: { stepId: string; value: string };
   result: { effectId: string; value: string };
   created_at: string;
 }
 
 const id = randomUUID();
-const idempotencyKey = `idempotency-demo-${randomUUID()}`;
+const idempotencyKey = stepEffectKey(id);
+const killMode = process.argv.includes("--kill");
 let originalDeadline: string | null = null;
 
 async function sample(): Promise<Sample> {
@@ -124,7 +131,7 @@ async function sample(): Promise<Sample> {
 async function effects(): Promise<EffectRow[]> {
   const result = await pool.query<EffectRow>(
     `select idempotency_key, effect_type, request, result, created_at::text
-     from idempotent_effects where idempotency_key = $1`, [idempotencyKey],
+     from idempotent_effects where idempotency_key = $1 or request ->> 'stepId' = $2`, [idempotencyKey, id],
   );
   return result.rows;
 }
@@ -158,6 +165,10 @@ async function stopChildren(success: boolean) {
   }
   if (success) {
     for (const child of children) {
+      if (child.expectedKill) {
+        assert.equal(child.process.signalCode, "SIGKILL");
+        continue;
+      }
       assert.equal(child.process.exitCode, 0, `child ${child.process.pid} did not shut down cleanly`);
     }
   }
@@ -184,7 +195,7 @@ async function main() {
 
     // delayAfterEffectMs holds the execution open after its effect commits,
     // which is the window this demo needs to stop A inside.
-    const payload = { idempotencyKey, value: "receipt-created", delayAfterEffectMs: 25_000 };
+    const payload = { value: "receipt-created", delayAfterEffectMs: 25_000 };
     await pool.query(
       `insert into steps (id, status, task_type, payload)
        values ($1, 'READY', 'idempotent_effect', $2::jsonb)`, [id, JSON.stringify(payload)],
@@ -197,15 +208,24 @@ async function main() {
     await waitFor("A's effect committed", async () => (await effects()).length === 1);
     applied = (await effects())[0]!;
     assert.equal(applied.effect_type, "demo_receipt");
-    assert.deepEqual(applied.request, { value: "receipt-created" });
+    assert.equal(applied.idempotency_key, idempotencyKey);
+    assert.deepEqual(applied.request, { stepId: id, value: "receipt-created" });
     console.log(`[demo] effect ${applied.result.effectId} committed by A at ${applied.created_at}, step not completed`);
 
-    signal(a, "SIGSTOP");
-    await waitFor("OS reports A stopped", async () => {
-      const { stdout } = await execFileAsync("ps", ["-o", "stat=", "-p", String(a.process.pid)]);
-      return stdout.trim().startsWith("T");
-    });
-    console.log(`[demo] SIGSTOP confirmed by OS for worker-a PID ${a.process.pid}; its execution is pending`);
+    if (killMode) {
+      a.expectedKill = true;
+      signal(a, "SIGKILL");
+      await a.done;
+      assert.equal(a.process.signalCode, "SIGKILL");
+      console.log(`[demo] actual worker-a Node PID ${a.process.pid} killed after effect commit, before completion`);
+    } else {
+      signal(a, "SIGSTOP");
+      await waitFor("OS reports A stopped", async () => {
+        const { stdout } = await execFileAsync("ps", ["-o", "stat=", "-p", String(a.process.pid)]);
+        return stdout.trim().startsWith("T");
+      });
+      console.log(`[demo] SIGSTOP confirmed by OS for worker-a PID ${a.process.pid}; its execution is pending`);
+    }
 
     // Fail promptly if orchestration stopped A inside a step transaction,
     // whose retained lock could defer recovery. Lock-only probe; it makes no
@@ -273,7 +293,20 @@ async function main() {
       assert.equal(state.row.attempt_count, 2);
       return true;
     });
-    console.log("[demo] sampled worker-b RUNNING v2; worker-a remains stopped");
+    console.log(`[demo] sampled worker-b RUNNING v2 attempt 2; worker-a ${killMode ? "is dead" : "remains stopped"}`);
+
+    // Probe both stale write paths with A's captured credentials while v2
+    // is RUNNING and live. Same-ID generation isolation is covered in tests.
+    const liveV2 = (await sample()).row;
+    const db = drizzle(pool);
+    await assert.rejects(completeStepSuccess(db, {
+      id, workerId: "worker-a", leaseVersion: 1, result: applied.result,
+    }), CompletionConsistencyError);
+    assert.deepEqual(await recordStepFailure(db, {
+      id, workerId: "worker-a", leaseVersion: 1, retryable: true, error: "stale post-effect failure probe",
+    }), { recorded: false });
+    assert.deepEqual((await sample()).row, liveV2);
+    console.log("[demo] captured v1 completion and failure probes rejected while v2 is live; row unchanged");
 
     await waitFor("B completed v2", async () => (await sample()).row.status === "SUCCEEDED", 40_000);
     await waitFor("B logged its v2 completion", async () => b.output.includes(`completed step ${id} at lease_version 2:`));
@@ -290,12 +323,14 @@ async function main() {
       `[demo] B completed v2 reusing effect ${applied.result.effectId}; still exactly one effect row for this key`,
     );
 
-    signal(a, "SIGCONT");
-    console.log(`[demo] SIGCONT sent to the same worker-a PID ${a.process.pid}`);
-    await waitFor("A's original v1 execution attempted completion and was rejected", async () => {
-      assert(!a.output.includes(`completed step ${id} at lease_version 1:`), "stale v1 completion was accepted");
-      return a.output.includes(`step ${id} completion rejected at lease_version 1`);
-    }, 40_000);
+    if (!killMode) {
+      signal(a, "SIGCONT");
+      console.log(`[demo] SIGCONT sent to the same worker-a PID ${a.process.pid}`);
+      await waitFor("A's original v1 execution attempted completion and was rejected", async () => {
+        assert(!a.output.includes(`completed step ${id} at lease_version 1:`), "stale v1 completion was accepted");
+        return a.output.includes(`step ${id} completion rejected at lease_version 1`);
+      }, 40_000);
+    }
     assert.deepEqual((await sample()).row, completedV2, "stale execution mutated v2's terminal row");
     assert.deepEqual(await effects(), [applied], "stale execution produced a second effect");
     success = true;
@@ -312,7 +347,8 @@ async function main() {
           `[demo] PASS: 2 executions (v1 by worker-a, v2 by worker-b), ${finalEffects.length} durable effect ` +
             `(${applied.result.effectId}, created ${applied.created_at}), step SUCCEEDED at lease_version ` +
             `${completedV2.lease_version} attempt_count ${completedV2.attempt_count} with the stored effect result. ` +
-            `A's resumed v1 completion was rejected. At-least-once execution, one logical side effect — not exactly-once.`,
+            `${killMode ? "A was killed; captured stale writes were rejected." : "A resumed old execution; its v1 completion was rejected."} ` +
+            `At-least-once execution; at most one receipt per step in this PostgreSQL sink.`,
         );
       }
     } finally {

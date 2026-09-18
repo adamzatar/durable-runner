@@ -260,3 +260,65 @@ describe("concurrent callers of the same key", () => {
     }
   }, 30_000);
 });
+
+
+describe("database atomicity and uniqueness", () => {
+  it("database uniqueness rejects a duplicate even outside the application helper", async () => {
+    const key = randomUUID();
+    // No ON CONFLICT dependency: dropping the constraint must expose a
+    // successful duplicate insert, not merely an invalid conflict target.
+    await admin.query(`insert into idempotent_effects
+      (idempotency_key, effect_type, request, result, created_at)
+      values ($1, 'demo_receipt', '{"value":"v"}', '{"effectId":"original","value":"v"}', clock_timestamp())`, [key]);
+    await expect(admin.query(`insert into idempotent_effects
+      select * from idempotent_effects where idempotency_key = $1`, [key]))
+      .rejects.toMatchObject({ code: "23505" });
+    expect(await countEffects(key)).toBe(1);
+  });
+
+  it("rolling back the effect insert leaves neither a receipt nor an idempotency record", async () => {
+    const key = randomUUID();
+    await expect(caller.transaction(async (tx) => {
+      const effect = await applyIdempotentEffect(tx, request(key));
+      expect(effect.applied).toBe(true);
+      expect(await countEffects(key)).toBe(0); // another connection sees no uncommitted row
+      throw new Error("rollback after insert");
+    })).rejects.toThrow("rollback after insert");
+    expect(await countEffects(key)).toBe(0);
+    const retried = await applyIdempotentEffect(caller, request(key));
+    expect(retried.applied).toBe(true);
+    expect(await readEffect(key)).toMatchObject({ result: retried.result });
+    expect(await countEffects(key)).toBe(1);
+  });
+
+  it.each(["commit", "rollback"])("a caller waiting behind an uncommitted effect handles %s", async (finish) => {
+    const key = randomUUID();
+    const blocker = await admin.connect();
+    const blockedPool = new Pool({ connectionString, max: 1, statement_timeout: 5000 });
+    let pending: Promise<EffectOutcome> | undefined;
+    try {
+      const pid = (await blockedPool.query("select pg_backend_pid() as pid")).rows[0].pid;
+      await blocker.query("begin");
+      const first = await applyIdempotentEffect(drizzle(blocker), request(key));
+      pending = applyIdempotentEffect(drizzle(blockedPool), request(key));
+      // Observe a real database lock wait before releasing the transaction.
+      const watchdog = Date.now() + 3000;
+      while (!(await admin.query("select cardinality(pg_blocking_pids($1)) > 0 as waiting", [pid])).rows[0].waiting) {
+        if (Date.now() > watchdog) throw new Error("caller never waited for insert");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await blocker.query(finish);
+      const outcome = await pending;
+      expect(outcome.applied).toBe(finish === "rollback");
+      if (finish === "commit") expect(outcome.result).toEqual(first.result);
+      else expect(outcome.result.effectId).not.toBe(first.result.effectId);
+      expect(await countEffects(key)).toBe(1);
+      expect(await readEffect(key)).toMatchObject({ result: outcome.result });
+    } finally {
+      await blocker.query("rollback");
+      if (pending) await pending.catch(() => {});
+      blocker.release();
+      await blockedPool.end();
+    }
+  });
+});

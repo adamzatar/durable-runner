@@ -164,10 +164,9 @@ export const workers = pgTable("workers", {
 // milestone exists to show: effect committed, process lost before its step
 // completion committed.
 export const idempotentEffects = pgTable("idempotent_effects", {
-  // Supplied by the caller and stable across re-executions of the same
-  // logical work; the primary key is what makes duplicate application
-  // impossible rather than merely unlikely. A step's payload carries it, so
-  // every generation that executes that step derives the same key.
+  // The executor derives step:<UUID>:demo_receipt from logical step identity.
+  // The primary key prevents duplicate application across generations.
+  // Step identity also appears in request JSON; no new column is needed.
   idempotencyKey: text("idempotency_key").primaryKey(),
   // What kind of effect this key stands for. Stored so a repeat request
   // that means something different can be rejected instead of silently

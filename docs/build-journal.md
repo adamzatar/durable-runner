@@ -272,3 +272,43 @@ not a routine setup log.
   while writing it: Drizzle wraps driver errors as "Failed query: ...", so
   the injected message is on the cause chain, not `error.message` — the first
   version of the assertion passed for the wrong reason until that was fixed.
+
+
+### Step-owned effect identity and stronger post-effect proofs
+
+The committed baseline already had the PostgreSQL receipt sink and an
+idempotency demo. Inspection found that the executor accepted the key from
+the payload. Two different steps with identical requests could therefore
+reuse one caller-supplied key and silently share a receipt. The executor now
+derives `step:<lowercase UUID>:demo_receipt` from the claimed step identity
+and stores that identity in request JSON. Payload-owned keys are rejected
+as invalid input; historical receipts are not rewritten. No schema change
+or rewrite of the existing insert/conflict/read operation was needed.
+
+The old post-effect stale-completion test completed v2 before attempting
+v1's write. Although the write was rejected, terminal status alone could
+explain that result. The strengthened tests keep same-worker-ID v2 live and
+RUNNING, then reject stale completion and both retry/dead-letter reports,
+asserting the entire step row remains unchanged. This isolates generation
+fencing after the effect rather than borrowing evidence from terminal state.
+
+Rollback tests establish that a receipt and its idempotency record are the
+same atomic row. Separate connections also exercise a conflicting insert
+that is still uncommitted, with both commit and rollback outcomes. A final
+claimed attempt can apply an effect and expire into DEAD_LETTERED: deduplication
+does not refund attempts or guarantee an authoritative success result.
+
+The process demo now has two modes: SIGSTOP/SIGCONT preserves stale
+computation so it can resume, while `--kill` SIGKILLs the actual Node worker
+after the receipt commits. The killed worker cannot resume; that mode uses
+captured v1 credentials for stale-write probes. Both modes keep effect and
+completion in separate transactions and assert the final receipt and step.
+
+Targeted mutations were run and restored: dropping the actual effect primary
+key allowed a duplicate SQL insert (two rows), which failed the uniqueness
+test; unstable and attempt-derived keys broke reuse; removing the completion
+version guard accepted stale success; removing the failure version guard
+accepted stale retry and dead-letter decisions; returning a fresh result
+instead of the stored result failed repeat assertions. The primary key was
+recreated after removing the mutation-created duplicate. Production fencing
+and retry write paths were not changed.
