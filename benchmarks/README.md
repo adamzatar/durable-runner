@@ -1,9 +1,14 @@
 # Benchmarks (Milestone 10)
 
-**Status: results pending.** The previously stored artifact was moved to
-[`results/invalid/`](results/invalid/) unapproved; no numbers from it are
-presented here. This document will be updated with methodology and results
-from the first approved full run of `npm run bench`.
+**Approved result:**
+[`results/2026-09-19T01-14-28-972Z_3cbb858.md`](results/2026-09-19T01-14-28-972Z_3cbb858.md)
+(raw data in the matching `.json`). It measures the runtime at commit
+`3cbb858` on a local Apple M2 with PostgreSQL 16.15 on the same machine, and
+it is the only artifact to cite. Headline numbers are summarized in the
+repository `README.md`.
+
+Artifacts under [`results/invalid/`](results/invalid/) are quarantined, were
+never approved, and must not be cited; see that directory's README.
 
 The benchmark measures the finished runtime: PostgreSQL `FOR UPDATE SKIP
 LOCKED` claiming, leases, heartbeats, lease renewal, fencing by
@@ -62,5 +67,7 @@ name must end in `_bench`). On battery or in Low Power Mode the harness
 exits unless `--allow-low-power` is given; on an overloaded machine
 (1-minute load above the core count, or macOS reporting under 15% memory
 free) it exits unless `--allow-high-load` is given. Both flags are recorded
-in the artifact. A second concurrent invocation exits without touching the
-database.
+in the artifact. The power and memory-pressure checks use macOS tools
+(`pmset`, `memory_pressure`) and are skipped on other platforms, where only
+the load check applies; the approved run was on macOS. A second concurrent
+invocation exits without touching the database.

@@ -2,11 +2,13 @@
 
 ## What this is
 
-A small backend system for executing multi-step "runs" of work with durable
-state, concurrency-safe claiming, worker heartbeats/leases, fencing against
-stale workers, retries with backoff, idempotent side effects, and a separate
-verification step after execution. A React frontend shows live state and
-event history over Server-Sent Events (SSE).
+A small backend system for executing steps of work with durable state,
+concurrency-safe claiming, worker heartbeats/leases, fencing against stale
+workers, retries with backoff, idempotent side effects, and durable event
+history served over REST and Server-Sent Events (SSE). Grouping steps into
+multi-step runs and a separate verification step after execution are
+planned, not implemented. The React frontend is currently a diagnostic page
+(health plus the live event feed), not an operational console.
 
 This is a learning/demo project built to understand and be able to defend,
 in detail, the mechanics of durable task execution and failure recovery. It
@@ -14,9 +16,11 @@ is not a product and is not trying to look like one.
 
 ## Core behavior
 
-- Work is submitted as a **run** containing one or more **steps**.
+- The unit of work is a **step** (a row in `steps`). Multi-step **runs** are
+  planned, not implemented; steps are currently inserted directly by demos,
+  tests and the benchmark.
 - Steps move through an explicit state machine (see `docs/architecture.md`).
-- Multiple worker loops claim steps from PostgreSQL concurrently, without
+- Multiple worker processes claim steps from PostgreSQL concurrently, without
   double-claiming the same step.
 - Workers send heartbeats. A worker that stops heartbeating does not
   immediately lose its step — its lease must expire first.
@@ -30,21 +34,20 @@ is not a product and is not trying to look like one.
 - Failed steps retry with exponential backoff up to a max attempt count, then
   move to a dead-lettered state.
 - An executor reporting success is not the same as the system verifying that
-  success. Verification is a distinct step recorded separately from
-  execution outcome.
-- Every state transition and operationally relevant event is recorded in a
-  durable, append-only event history, visible in the browser in near
-  real time via SSE.
+  success. Verification as a distinct step recorded separately from
+  execution outcome is planned, not implemented.
+- Every lifecycle state transition is recorded in a durable, append-only
+  event history in the same transaction, readable over REST and streamed
+  via SSE.
 
 ## Constraints
 
 - TypeScript end to end (Node/Fastify backend, React/Vite frontend).
 - PostgreSQL is the only coordination store. No message broker, no cache
   layer, no separate lock service.
-- Intended to eventually run on Replit (Reserved VM). Whether worker
-  processes there run as independent OS processes or as logical loops
-  inside one process is an open question resolved by an environment spike,
-  not assumed in advance.
+- Intended to eventually run on Replit (Reserved VM). Locally, workers and
+  the coordinator run as independent Node OS processes; this has not been
+  validated on Replit.
 - GitHub is the source of truth for the repository.
 
 ## What this project claims, and what it does not
@@ -58,9 +61,8 @@ is not a product and is not trying to look like one.
 - It does **not** claim to be production-grade, enterprise-ready, highly
   available, or horizontally scaled. It is a single-database, small-scale
   system built to demonstrate specific mechanisms correctly.
-- If worker processes turn out to run as logical loops in one process rather
-  than separate OS processes (see environment spike), the system will say so
-  plainly rather than presenting loops as if they were independent machines.
+- Workers run as separate local OS processes on one machine, not as
+  separate machines, and are not presented as such.
 
 ## Intended demo
 
@@ -82,12 +84,17 @@ actual backend behavior (not frontend animation):
 9. The browser shows this entire sequence as real event history, not staged
    UI state.
 
+Items 1-6 and 8 are implemented as `npm run demo:*` scripts (see
+`README.md`). Items 7 (verification) and 9 (a timeline UI) are not built yet;
+the durable history behind item 9 exists and is exposed over REST/SSE.
+
 ## Architecture, broadly
 
-REST endpoints handle commands (submit a run, cancel, etc.). One SSE
-endpoint streams live state changes and events to the browser. Worker loops
-poll PostgreSQL to claim available steps, execute them, and report outcomes
-back through the same claim/fencing mechanism. See `docs/architecture.md`
+The HTTP API currently exposes health plus durable event history (REST and
+one SSE stream). Command endpoints (submit, cancel) are planned, not
+implemented. Worker processes poll PostgreSQL to claim available steps,
+execute them, and report outcomes back through the same claim/fencing
+mechanism. See `docs/architecture.md`
 for the current design, open questions, and what is explicitly out of scope
 for now.
 
