@@ -1,0 +1,2121 @@
+{
+  "runId": "2026-09-18T19-52-51-430Z_3cbb858",
+  "quick": false,
+  "allowLowPowerOverride": false,
+  "selectedSuites": [
+    "throughput",
+    "paced",
+    "contention",
+    "stale",
+    "idempotency",
+    "events"
+  ],
+  "environment": {
+    "timestamp": "2026-09-18T19:52:51.430Z",
+    "git": {
+      "commit": "3cbb8589eff18638ead4dbd41a3d63dc390192f5",
+      "subject": "Harden idempotent effect handling",
+      "runtimeSourceUnmodified": true,
+      "uncommittedPaths": [
+        "M package.json",
+        "?? benchmarks/"
+      ]
+    },
+    "node": "v20.19.4",
+    "os": {
+      "platform": "darwin",
+      "release": "25.6.0",
+      "productVersion": "26.7",
+      "arch": "arm64"
+    },
+    "cpu": {
+      "model": "Apple M2",
+      "logicalCores": 8,
+      "performanceCores": 4,
+      "efficiencyCores": 4
+    },
+    "memoryGiB": 16,
+    "power": {
+      "source": "AC Power",
+      "lowPowerMode": false
+    },
+    "loadAverageAtStart": [
+      6.17,
+      17,
+      21.24
+    ],
+    "postgres": {
+      "version": "PostgreSQL 16.15 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit",
+      "serverVersion": "16.15 (Homebrew)",
+      "host": "127.0.0.1",
+      "port": "5433",
+      "database": "durable_runner_bench",
+      "location": "local (same machine as workers and harness)",
+      "settings": {
+        "autovacuum": "on",
+        "autovacuum_naptime": "1min",
+        "checkpoint_timeout": "5min",
+        "commit_delay": "0",
+        "default_transaction_isolation": "read committed",
+        "fsync": "on",
+        "full_page_writes": "on",
+        "max_connections": "100",
+        "max_wal_size": "1GB",
+        "shared_buffers": "128MB",
+        "synchronous_commit": "on",
+        "wal_level": "replica",
+        "wal_sync_method": "open_datasync",
+        "work_mem": "4MB"
+      }
+    }
+  },
+  "powerAtEnd": {
+    "source": "AC Power",
+    "lowPowerMode": false
+  },
+  "loadAverageAtEnd": [
+    4.83,
+    15.51,
+    19.75
+  ],
+  "suites": {
+    "throughput": {
+      "config": {
+        "workerCounts": [
+          1,
+          3,
+          8
+        ],
+        "tasks": 50000,
+        "repetitions": 3
+      },
+      "runOrder": "interleaved by repetition",
+      "runs": [
+        {
+          "config": {
+            "workers": 1,
+            "tasks": 50000,
+            "arrival": {
+              "kind": "backlog"
+            }
+          },
+          "tasks": 50000,
+          "succeeded": 50000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 50000
+          },
+          "resultsVerifiedBySha256InSql": 50000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:52:59.866263-04",
+          "lastTerminalAt": "2026-09-18 15:53:50.11836-04",
+          "wallSeconds": 50.252,
+          "arrivalSpanSeconds": 0,
+          "tasksPerSecond": 995,
+          "firstClaimDelayMs": 33.6,
+          "activeSeconds": 50.218,
+          "tasksPerActiveSecond": 995.6,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 24970.85,
+              "p95": 47715.77,
+              "p99": 49742.81,
+              "max": 50252.1
+            },
+            "queueWait": {
+              "p50": 24970.42,
+              "p95": 47715.33,
+              "p99": 49742.38,
+              "max": 50251.65
+            },
+            "claimToCompletion": {
+              "p50": 0.44,
+              "p95": 0.65,
+              "p99": 1.14,
+              "max": 33.59
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 50000,
+            "STEP_SUCCEEDED": 50000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 50000
+          },
+          "completionsPerSecond": [
+            453,
+            985,
+            1035,
+            1101,
+            1069,
+            871,
+            959,
+            1081,
+            955,
+            891,
+            1026,
+            1066,
+            1087,
+            1099,
+            1100,
+            1072,
+            942,
+            856,
+            1017,
+            1085,
+            1039,
+            1048,
+            1071,
+            1068,
+            1056,
+            1034,
+            990,
+            1034,
+            1001,
+            977,
+            932,
+            915,
+            838,
+            916,
+            1013,
+            1031,
+            1039,
+            912,
+            803,
+            1039,
+            1036,
+            1029,
+            1098,
+            1042,
+            1059,
+            1063,
+            936,
+            1045,
+            1029,
+            913,
+            244
+          ],
+          "tableBytesAfterRun": {
+            "steps": 19750912,
+            "stepEvents": 27164672
+          },
+          "wal": {
+            "walBytes": 109719024,
+            "walRecords": 975797,
+            "walFullPageImages": 1717,
+            "bytesPerTask": 2194
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 26376
+            },
+            "step_events": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              6.17,
+              17,
+              21.24
+            ],
+            "after": [
+              5.79,
+              15.17,
+              20.29
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 3,
+            "tasks": 50000,
+            "arrival": {
+              "kind": "backlog"
+            }
+          },
+          "tasks": 50000,
+          "succeeded": 50000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 50000
+          },
+          "resultsVerifiedBySha256InSql": 50000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:54:02.544688-04",
+          "lastTerminalAt": "2026-09-18 15:54:26.891694-04",
+          "wallSeconds": 24.347,
+          "arrivalSpanSeconds": 0,
+          "tasksPerSecond": 2053.6,
+          "firstClaimDelayMs": 89.9,
+          "activeSeconds": 24.257,
+          "tasksPerActiveSecond": 2061.2,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 11796.16,
+              "p95": 23347.29,
+              "p99": 24126.95,
+              "max": 24347.01
+            },
+            "queueWait": {
+              "p50": 11795.48,
+              "p95": 23346.67,
+              "p99": 24126.33,
+              "max": 24346.53
+            },
+            "claimToCompletion": {
+              "p50": 0.58,
+              "p95": 1.27,
+              "p99": 2.38,
+              "max": 92.09
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 50000,
+            "STEP_SUCCEEDED": 50000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 16691,
+            "bench-worker-2": 16658,
+            "bench-worker-3": 16651
+          },
+          "completionsPerSecond": [
+            1616,
+            2303,
+            2089,
+            2027,
+            2373,
+            2234,
+            2285,
+            2350,
+            2360,
+            2073,
+            1304,
+            2490,
+            1635,
+            1492,
+            1647,
+            1402,
+            1645,
+            2241,
+            2363,
+            1394,
+            2170,
+            2567,
+            2520,
+            2610,
+            810
+          ],
+          "tableBytesAfterRun": {
+            "steps": 19881984,
+            "stepEvents": 27164672
+          },
+          "wal": {
+            "walBytes": 108134392,
+            "walRecords": 963679,
+            "walFullPageImages": 1417,
+            "bytesPerTask": 2163
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 0,
+              "deadTuplesAtEnd": 98913
+            },
+            "step_events": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 0,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              5.57,
+              14.96,
+              20.19
+            ],
+            "after": [
+              7.86,
+              14.54,
+              19.83
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0,
+              "bench-worker-2": 0,
+              "bench-worker-3": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 8,
+            "tasks": 50000,
+            "arrival": {
+              "kind": "backlog"
+            }
+          },
+          "tasks": 50000,
+          "succeeded": 50000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 50000
+          },
+          "resultsVerifiedBySha256InSql": 50000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:54:39.222977-04",
+          "lastTerminalAt": "2026-09-18 15:54:58.563933-04",
+          "wallSeconds": 19.341,
+          "arrivalSpanSeconds": 0,
+          "tasksPerSecond": 2585.2,
+          "firstClaimDelayMs": 84.9,
+          "activeSeconds": 19.256,
+          "tasksPerActiveSecond": 2596.6,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 9770.06,
+              "p95": 18491.3,
+              "p99": 19172.46,
+              "max": 19340.96
+            },
+            "queueWait": {
+              "p50": 9768.32,
+              "p95": 18490.12,
+              "p99": 19170.78,
+              "max": 19340
+            },
+            "claimToCompletion": {
+              "p50": 1.34,
+              "p95": 3.35,
+              "p99": 6.57,
+              "max": 88.8
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 50000,
+            "STEP_SUCCEEDED": 50000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 6245,
+            "bench-worker-2": 6286,
+            "bench-worker-3": 6254,
+            "bench-worker-4": 6106,
+            "bench-worker-5": 6251,
+            "bench-worker-6": 6251,
+            "bench-worker-7": 6318,
+            "bench-worker-8": 6289
+          },
+          "completionsPerSecond": [
+            1719,
+            2258,
+            1735,
+            2662,
+            2251,
+            3049,
+            2911,
+            2839,
+            3080,
+            3025,
+            2993,
+            3163,
+            3033,
+            2644,
+            2134,
+            1772,
+            2450,
+            2544,
+            2750,
+            988
+          ],
+          "tableBytesAfterRun": {
+            "steps": 20398080,
+            "stepEvents": 27181056
+          },
+          "wal": {
+            "walBytes": 108584168,
+            "walRecords": 965649,
+            "walFullPageImages": 1448,
+            "bytesPerTask": 2172
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 0,
+              "deadTuplesAtEnd": 98588
+            },
+            "step_events": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              9.55,
+              14.78,
+              19.88
+            ],
+            "after": [
+              38.15,
+              20.66,
+              21.83
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0,
+              "bench-worker-2": 0,
+              "bench-worker-3": 0,
+              "bench-worker-4": 0,
+              "bench-worker-5": 0,
+              "bench-worker-6": 0,
+              "bench-worker-7": 0,
+              "bench-worker-8": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 1,
+            "tasks": 50000,
+            "arrival": {
+              "kind": "backlog"
+            }
+          },
+          "tasks": 50000,
+          "succeeded": 50000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 50000
+          },
+          "resultsVerifiedBySha256InSql": 50000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:55:10.444856-04",
+          "lastTerminalAt": "2026-09-18 15:56:03.533809-04",
+          "wallSeconds": 53.089,
+          "arrivalSpanSeconds": 0,
+          "tasksPerSecond": 941.8,
+          "firstClaimDelayMs": 32.8,
+          "activeSeconds": 53.056,
+          "tasksPerActiveSecond": 942.4,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 26780.58,
+              "p95": 50698.02,
+              "p99": 52611.22,
+              "max": 53088.95
+            },
+            "queueWait": {
+              "p50": 26780.12,
+              "p95": 50697.58,
+              "p99": 52610.78,
+              "max": 53088.48
+            },
+            "claimToCompletion": {
+              "p50": 0.46,
+              "p95": 0.7,
+              "p99": 1.36,
+              "max": 73.05
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 50000,
+            "STEP_SUCCEEDED": 50000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 50000
+          },
+          "completionsPerSecond": [
+            481,
+            976,
+            944,
+            914,
+            839,
+            867,
+            991,
+            748,
+            1003,
+            1083,
+            1040,
+            893,
+            957,
+            1041,
+            1018,
+            997,
+            993,
+            938,
+            907,
+            973,
+            960,
+            1060,
+            843,
+            1001,
+            934,
+            918,
+            848,
+            694,
+            664,
+            390,
+            800,
+            742,
+            953,
+            1046,
+            1066,
+            937,
+            987,
+            1029,
+            1016,
+            1082,
+            1088,
+            942,
+            1008,
+            1060,
+            1048,
+            1002,
+            1058,
+            1072,
+            874,
+            1042,
+            1051,
+            1052,
+            1034,
+            96
+          ],
+          "tableBytesAfterRun": {
+            "steps": 19718144,
+            "stepEvents": 27164672
+          },
+          "wal": {
+            "walBytes": 109260560,
+            "walRecords": 977365,
+            "walFullPageImages": 1623,
+            "bytesPerTask": 2185
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 49799
+            },
+            "step_events": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              41.67,
+              21.68,
+              22.18
+            ],
+            "after": [
+              34.74,
+              23.12,
+              22.67
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 3,
+            "tasks": 50000,
+            "arrival": {
+              "kind": "backlog"
+            }
+          },
+          "tasks": 50000,
+          "succeeded": 50000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 50000
+          },
+          "resultsVerifiedBySha256InSql": 50000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:56:16.400726-04",
+          "lastTerminalAt": "2026-09-18 15:56:38.647074-04",
+          "wallSeconds": 22.246,
+          "arrivalSpanSeconds": 0,
+          "tasksPerSecond": 2247.6,
+          "firstClaimDelayMs": 41.1,
+          "activeSeconds": 22.205,
+          "tasksPerActiveSecond": 2251.7,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 11440.54,
+              "p95": 21035.66,
+              "p99": 22032.7,
+              "max": 22246.35
+            },
+            "queueWait": {
+              "p50": 11440.07,
+              "p95": 21035,
+              "p99": 22031.96,
+              "max": 22245.86
+            },
+            "claimToCompletion": {
+              "p50": 0.57,
+              "p95": 1.03,
+              "p99": 1.64,
+              "max": 51.2
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 50000,
+            "STEP_SUCCEEDED": 50000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 16651,
+            "bench-worker-2": 16698,
+            "bench-worker-3": 16651
+          },
+          "completionsPerSecond": [
+            1543,
+            2456,
+            2276,
+            2456,
+            2360,
+            2524,
+            2099,
+            2115,
+            2080,
+            2115,
+            1970,
+            2352,
+            2137,
+            2431,
+            2346,
+            2119,
+            2433,
+            2250,
+            2432,
+            2513,
+            2414,
+            2029,
+            550
+          ],
+          "tableBytesAfterRun": {
+            "steps": 20037632,
+            "stepEvents": 27205632
+          },
+          "wal": {
+            "walBytes": 110052264,
+            "walRecords": 1121971,
+            "walFullPageImages": 1811,
+            "bytesPerTask": 2201
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 4705
+            },
+            "step_events": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              33.96,
+              23.15,
+              22.69
+            ],
+            "after": [
+              26.98,
+              22.46,
+              22.45
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0,
+              "bench-worker-2": 0,
+              "bench-worker-3": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 8,
+            "tasks": 50000,
+            "arrival": {
+              "kind": "backlog"
+            }
+          },
+          "tasks": 50000,
+          "succeeded": 50000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 50000
+          },
+          "resultsVerifiedBySha256InSql": 50000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:56:51.107226-04",
+          "lastTerminalAt": "2026-09-18 15:57:10.750776-04",
+          "wallSeconds": 19.644,
+          "arrivalSpanSeconds": 0,
+          "tasksPerSecond": 2545.4,
+          "firstClaimDelayMs": 151.4,
+          "activeSeconds": 19.492,
+          "tasksPerActiveSecond": 2565.1,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 10297.64,
+              "p95": 18688.07,
+              "p99": 19415.81,
+              "max": 19643.55
+            },
+            "queueWait": {
+              "p50": 10295.72,
+              "p95": 18686.92,
+              "p99": 19413.45,
+              "max": 19636.79
+            },
+            "claimToCompletion": {
+              "p50": 1.31,
+              "p95": 2.97,
+              "p99": 7.69,
+              "max": 80.8
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 50000,
+            "STEP_SUCCEEDED": 50000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 6277,
+            "bench-worker-2": 6245,
+            "bench-worker-3": 6244,
+            "bench-worker-4": 6262,
+            "bench-worker-5": 6239,
+            "bench-worker-6": 6227,
+            "bench-worker-7": 6259,
+            "bench-worker-8": 6247
+          },
+          "completionsPerSecond": [
+            593,
+            982,
+            2156,
+            2976,
+            2750,
+            2967,
+            2988,
+            2689,
+            2993,
+            3167,
+            2999,
+            2393,
+            2767,
+            2231,
+            2841,
+            2870,
+            2624,
+            2635,
+            2713,
+            1666
+          ],
+          "tableBytesAfterRun": {
+            "steps": 20365312,
+            "stepEvents": 27197440
+          },
+          "wal": {
+            "walBytes": 108558192,
+            "walRecords": 946141,
+            "walFullPageImages": 1418,
+            "bytesPerTask": 2171
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 0,
+              "deadTuplesAtEnd": 96520
+            },
+            "step_events": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 0,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              25.38,
+              22.2,
+              22.36
+            ],
+            "after": [
+              48.38,
+              27.74,
+              24.34
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0,
+              "bench-worker-2": 0,
+              "bench-worker-3": 0,
+              "bench-worker-4": 0,
+              "bench-worker-5": 0,
+              "bench-worker-6": 0,
+              "bench-worker-7": 0,
+              "bench-worker-8": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 1,
+            "tasks": 50000,
+            "arrival": {
+              "kind": "backlog"
+            }
+          },
+          "tasks": 50000,
+          "succeeded": 50000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 50000
+          },
+          "resultsVerifiedBySha256InSql": 50000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:57:22.688799-04",
+          "lastTerminalAt": "2026-09-18 15:58:16.052987-04",
+          "wallSeconds": 53.364,
+          "arrivalSpanSeconds": 0,
+          "tasksPerSecond": 937,
+          "firstClaimDelayMs": 95.4,
+          "activeSeconds": 53.269,
+          "tasksPerActiveSecond": 938.6,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 28330.73,
+              "p95": 50786.34,
+              "p99": 52895.43,
+              "max": 53364.19
+            },
+            "queueWait": {
+              "p50": 28330.3,
+              "p95": 50785.8,
+              "p99": 52895.01,
+              "max": 53363.77
+            },
+            "claimToCompletion": {
+              "p50": 0.46,
+              "p95": 0.7,
+              "p99": 1.39,
+              "max": 83.27
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 50000,
+            "STEP_SUCCEEDED": 50000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 50000
+          },
+          "completionsPerSecond": [
+            529,
+            936,
+            1033,
+            1053,
+            974,
+            975,
+            983,
+            864,
+            790,
+            926,
+            650,
+            1024,
+            682,
+            950,
+            965,
+            831,
+            963,
+            1011,
+            954,
+            930,
+            982,
+            840,
+            670,
+            370,
+            894,
+            999,
+            975,
+            918,
+            1019,
+            1019,
+            1005,
+            1039,
+            1043,
+            887,
+            703,
+            1005,
+            980,
+            1056,
+            1034,
+            1051,
+            1025,
+            1063,
+            1072,
+            1051,
+            1053,
+            1034,
+            1041,
+            965,
+            1008,
+            1017,
+            820,
+            945,
+            1004,
+            390
+          ],
+          "tableBytesAfterRun": {
+            "steps": 19841024,
+            "stepEvents": 27164672
+          },
+          "wal": {
+            "walBytes": 108894104,
+            "walRecords": 971614,
+            "walFullPageImages": 1544,
+            "bytesPerTask": 2178
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 74748
+            },
+            "step_events": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              48.38,
+              27.74,
+              24.34
+            ],
+            "after": [
+              23.4,
+              24.49,
+              23.37
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 3,
+            "tasks": 50000,
+            "arrival": {
+              "kind": "backlog"
+            }
+          },
+          "tasks": 50000,
+          "succeeded": 50000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 50000
+          },
+          "resultsVerifiedBySha256InSql": 50000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:58:28.574202-04",
+          "lastTerminalAt": "2026-09-18 15:58:49.207423-04",
+          "wallSeconds": 20.633,
+          "arrivalSpanSeconds": 0,
+          "tasksPerSecond": 2423.3,
+          "firstClaimDelayMs": 23.5,
+          "activeSeconds": 20.61,
+          "tasksPerActiveSecond": 2426,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 10709.55,
+              "p95": 19698.79,
+              "p99": 20450.18,
+              "max": 20633.22
+            },
+            "queueWait": {
+              "p50": 10708.86,
+              "p95": 19698.28,
+              "p99": 20449.54,
+              "max": 20632.35
+            },
+            "claimToCompletion": {
+              "p50": 0.53,
+              "p95": 0.94,
+              "p99": 1.39,
+              "max": 31.47
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 50000,
+            "STEP_SUCCEEDED": 50000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 16645,
+            "bench-worker-2": 16639,
+            "bench-worker-3": 16716
+          },
+          "completionsPerSecond": [
+            1781,
+            2431,
+            2332,
+            2288,
+            2670,
+            2182,
+            2590,
+            2285,
+            2448,
+            2235,
+            2467,
+            2670,
+            2703,
+            2623,
+            2041,
+            2570,
+            2556,
+            2274,
+            2537,
+            2622,
+            1695
+          ],
+          "tableBytesAfterRun": {
+            "steps": 20676608,
+            "stepEvents": 27205632
+          },
+          "wal": {
+            "walBytes": 109103928,
+            "walRecords": 946143,
+            "walFullPageImages": 1615,
+            "bytesPerTask": 2182
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 55110
+            },
+            "step_events": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              23.45,
+              24.48,
+              23.37
+            ],
+            "after": [
+              17.42,
+              22.98,
+              22.86
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0,
+              "bench-worker-2": 0,
+              "bench-worker-3": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 8,
+            "tasks": 50000,
+            "arrival": {
+              "kind": "backlog"
+            }
+          },
+          "tasks": 50000,
+          "succeeded": 50000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 50000
+          },
+          "resultsVerifiedBySha256InSql": 50000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:59:01.541615-04",
+          "lastTerminalAt": "2026-09-18 15:59:18.873006-04",
+          "wallSeconds": 17.331,
+          "arrivalSpanSeconds": 0,
+          "tasksPerSecond": 2884.9,
+          "firstClaimDelayMs": 24.1,
+          "activeSeconds": 17.307,
+          "tasksPerActiveSecond": 2889,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 8849.91,
+              "p95": 16308.64,
+              "p99": 17123.85,
+              "max": 17331.39
+            },
+            "queueWait": {
+              "p50": 8848.83,
+              "p95": 16307.11,
+              "p99": 17122.54,
+              "max": 17329.26
+            },
+            "claimToCompletion": {
+              "p50": 1.22,
+              "p95": 2.53,
+              "p99": 5.63,
+              "max": 66.51
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 50000,
+            "STEP_SUCCEEDED": 50000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 6276,
+            "bench-worker-2": 6215,
+            "bench-worker-3": 6313,
+            "bench-worker-4": 6243,
+            "bench-worker-5": 6215,
+            "bench-worker-6": 6287,
+            "bench-worker-7": 6168,
+            "bench-worker-8": 6283
+          },
+          "completionsPerSecond": [
+            1476,
+            2140,
+            2393,
+            3098,
+            3308,
+            3153,
+            3406,
+            3302,
+            3242,
+            3165,
+            3163,
+            2920,
+            3270,
+            3041,
+            3188,
+            2523,
+            2414,
+            798
+          ],
+          "tableBytesAfterRun": {
+            "steps": 20258816,
+            "stepEvents": 27181056
+          },
+          "wal": {
+            "walBytes": 108483040,
+            "walRecords": 1119760,
+            "walFullPageImages": 1427,
+            "bytesPerTask": 2170
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 0,
+              "deadTuplesAtEnd": 98855
+            },
+            "step_events": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 0,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              16.27,
+              22.65,
+              22.74
+            ],
+            "after": [
+              12.48,
+              21.23,
+              22.23
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0,
+              "bench-worker-2": 0,
+              "bench-worker-3": 0,
+              "bench-worker-4": 0,
+              "bench-worker-5": 0,
+              "bench-worker-6": 0,
+              "bench-worker-7": 0,
+              "bench-worker-8": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        }
+      ],
+      "summary": [
+        {
+          "workers": 1,
+          "runs": 3,
+          "tasksPerSecond": {
+            "median": 941.8,
+            "min": 937,
+            "max": 995,
+            "spreadPercentOfMedian": 6.2
+          },
+          "endToEndP50MsMedian": 26780.58,
+          "endToEndP95MsMedian": 50698.02,
+          "endToEndP99MsMedian": 52611.22,
+          "claimToCompletionP50MsMedian": 0.46,
+          "claimToCompletionP95MsMedian": 0.7,
+          "claimToCompletionP99MsMedian": 1.36,
+          "allTasksSucceeded": true
+        },
+        {
+          "workers": 3,
+          "runs": 3,
+          "tasksPerSecond": {
+            "median": 2247.6,
+            "min": 2053.6,
+            "max": 2423.3,
+            "spreadPercentOfMedian": 16.4
+          },
+          "endToEndP50MsMedian": 11440.54,
+          "endToEndP95MsMedian": 21035.66,
+          "endToEndP99MsMedian": 22032.7,
+          "claimToCompletionP50MsMedian": 0.57,
+          "claimToCompletionP95MsMedian": 1.03,
+          "claimToCompletionP99MsMedian": 1.64,
+          "allTasksSucceeded": true
+        },
+        {
+          "workers": 8,
+          "runs": 3,
+          "tasksPerSecond": {
+            "median": 2585.2,
+            "min": 2545.4,
+            "max": 2884.9,
+            "spreadPercentOfMedian": 13.1
+          },
+          "endToEndP50MsMedian": 9770.06,
+          "endToEndP95MsMedian": 18491.3,
+          "endToEndP99MsMedian": 19172.46,
+          "claimToCompletionP50MsMedian": 1.31,
+          "claimToCompletionP95MsMedian": 2.97,
+          "claimToCompletionP99MsMedian": 6.57,
+          "allTasksSucceeded": true
+        }
+      ]
+    },
+    "paced": {
+      "config": {
+        "workers": 8,
+        "fallbackRatePerSec": 1000,
+        "durationSeconds": 30,
+        "repetitions": 3
+      },
+      "ratePerSec": 1200,
+      "rateRule": "50% of the 8-worker median backlog throughput (2585.2 tasks/s) in this invocation, rounded down to a multiple of 100",
+      "tasksPerRun": 36000,
+      "runs": [
+        {
+          "config": {
+            "workers": 8,
+            "tasks": 36000,
+            "arrival": {
+              "kind": "paced",
+              "ratePerSec": 1200
+            }
+          },
+          "tasks": 36000,
+          "succeeded": 36000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 36000
+          },
+          "resultsVerifiedBySha256InSql": 36000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:59:23.323958-04",
+          "lastTerminalAt": "2026-09-18 15:59:53.454824-04",
+          "wallSeconds": 30.131,
+          "arrivalSpanSeconds": 29.998,
+          "tasksPerSecond": 1194.8,
+          "firstClaimDelayMs": 366.6,
+          "activeSeconds": 29.764,
+          "tasksPerActiveSecond": 1209.5,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 288.82,
+              "p95": 509.38,
+              "p99": 580.46,
+              "max": 688.24
+            },
+            "queueWait": {
+              "p50": 286.9,
+              "p95": 506.26,
+              "p99": 576.91,
+              "max": 681.55
+            },
+            "claimToCompletion": {
+              "p50": 1.33,
+              "p95": 3.63,
+              "p99": 8.97,
+              "max": 197.95
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 36000,
+            "STEP_SUCCEEDED": 36000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 4411,
+            "bench-worker-2": 4390,
+            "bench-worker-3": 4668,
+            "bench-worker-4": 4484,
+            "bench-worker-5": 4299,
+            "bench-worker-6": 4353,
+            "bench-worker-7": 4948,
+            "bench-worker-8": 4447
+          },
+          "completionsPerSecond": [
+            670,
+            1704,
+            1155,
+            1264,
+            1186,
+            615,
+            1477,
+            1057,
+            1211,
+            1062,
+            1395,
+            1106,
+            1085,
+            1271,
+            1379,
+            1216,
+            1131,
+            1032,
+            1177,
+            1328,
+            1455,
+            1361,
+            1119,
+            1051,
+            967,
+            1143,
+            1624,
+            1344,
+            537,
+            1784,
+            94
+          ],
+          "tableBytesAfterRun": {
+            "steps": 13508608,
+            "stepEvents": 20684800
+          },
+          "wal": {
+            "walBytes": 84529808,
+            "walRecords": 760816,
+            "walFullPageImages": 40,
+            "bytesPerTask": 2348
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 37560
+            },
+            "step_events": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              11.72,
+              20.93,
+              22.12
+            ],
+            "after": [
+              12.15,
+              20.19,
+              21.81
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0,
+              "bench-worker-2": 0,
+              "bench-worker-3": 0,
+              "bench-worker-4": 0,
+              "bench-worker-5": 0,
+              "bench-worker-6": 0,
+              "bench-worker-7": 0,
+              "bench-worker-8": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 8,
+            "tasks": 36000,
+            "arrival": {
+              "kind": "paced",
+              "ratePerSec": 1200
+            }
+          },
+          "tasks": 36000,
+          "succeeded": 36000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 36000
+          },
+          "resultsVerifiedBySha256InSql": 36000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 15:59:57.805725-04",
+          "lastTerminalAt": "2026-09-18 16:00:28.105511-04",
+          "wallSeconds": 30.3,
+          "arrivalSpanSeconds": 29.989,
+          "tasksPerSecond": 1188.1,
+          "firstClaimDelayMs": 321.9,
+          "activeSeconds": 29.978,
+          "tasksPerActiveSecond": 1200.9,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 260.88,
+              "p95": 501.2,
+              "p99": 519.18,
+              "max": 550.07
+            },
+            "queueWait": {
+              "p50": 259.19,
+              "p95": 498.81,
+              "p99": 516.31,
+              "max": 546.14
+            },
+            "claimToCompletion": {
+              "p50": 1.4,
+              "p95": 3.47,
+              "p99": 8.12,
+              "max": 225.33
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 36000,
+            "STEP_SUCCEEDED": 36000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 4492,
+            "bench-worker-2": 4518,
+            "bench-worker-3": 4471,
+            "bench-worker-4": 4506,
+            "bench-worker-5": 4477,
+            "bench-worker-6": 4527,
+            "bench-worker-7": 4530,
+            "bench-worker-8": 4479
+          },
+          "completionsPerSecond": [
+            1015,
+            981,
+            1174,
+            1207,
+            1154,
+            1283,
+            1511,
+            1200,
+            1241,
+            750,
+            1167,
+            1265,
+            1460,
+            1069,
+            1068,
+            1070,
+            1234,
+            1382,
+            1114,
+            1073,
+            1192,
+            1471,
+            1239,
+            1260,
+            1411,
+            1078,
+            1213,
+            1033,
+            1089,
+            1087,
+            509
+          ],
+          "tableBytesAfterRun": {
+            "steps": 14999552,
+            "stepEvents": 20733952
+          },
+          "wal": {
+            "walBytes": 84151216,
+            "walRecords": 758151,
+            "walFullPageImages": 19,
+            "bytesPerTask": 2338
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 0,
+              "deadTuplesAtEnd": 70203
+            },
+            "step_events": {
+              "autovacuumRuns": 0,
+              "autoanalyzeRuns": 0,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              11.26,
+              19.87,
+              21.69
+            ],
+            "after": [
+              10.86,
+              18.97,
+              21.3
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0,
+              "bench-worker-2": 0,
+              "bench-worker-3": 0,
+              "bench-worker-4": 0,
+              "bench-worker-5": 0,
+              "bench-worker-6": 0,
+              "bench-worker-7": 0,
+              "bench-worker-8": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        },
+        {
+          "config": {
+            "workers": 8,
+            "tasks": 36000,
+            "arrival": {
+              "kind": "paced",
+              "ratePerSec": 1200
+            }
+          },
+          "tasks": 36000,
+          "succeeded": 36000,
+          "failed": 0,
+          "statusCounts": {
+            "SUCCEEDED": 36000
+          },
+          "resultsVerifiedBySha256InSql": 36000,
+          "reclaimedTasks": 0,
+          "tasksNotClaimedExactlyOnce": 0,
+          "tasksWithoutExactlyOneTerminalEvent": 0,
+          "firstEligibleAt": "2026-09-18 16:00:32.495578-04",
+          "lastTerminalAt": "2026-09-18 16:01:02.856827-04",
+          "wallSeconds": 30.361,
+          "arrivalSpanSeconds": 30.002,
+          "tasksPerSecond": 1185.7,
+          "firstClaimDelayMs": 309.2,
+          "activeSeconds": 30.052,
+          "tasksPerActiveSecond": 1197.9,
+          "latencyMs": {
+            "endToEnd": {
+              "p50": 259.58,
+              "p95": 502.49,
+              "p99": 517.85,
+              "max": 549.23
+            },
+            "queueWait": {
+              "p50": 257.83,
+              "p95": 500.06,
+              "p99": 514.94,
+              "max": 546.54
+            },
+            "claimToCompletion": {
+              "p50": 1.34,
+              "p95": 2.95,
+              "p99": 7.63,
+              "max": 56.67
+            }
+          },
+          "eventCounts": {
+            "STEP_CLAIMED": 36000,
+            "STEP_SUCCEEDED": 36000
+          },
+          "eventsPerTask": 2,
+          "completionsPerWorker": {
+            "bench-worker-1": 4356,
+            "bench-worker-2": 4890,
+            "bench-worker-3": 4403,
+            "bench-worker-4": 4408,
+            "bench-worker-5": 4290,
+            "bench-worker-6": 4349,
+            "bench-worker-7": 4420,
+            "bench-worker-8": 4884
+          },
+          "completionsPerSecond": [
+            1106,
+            904,
+            1258,
+            1233,
+            1469,
+            641,
+            1425,
+            1317,
+            1166,
+            1002,
+            1081,
+            1432,
+            1153,
+            1144,
+            1110,
+            1264,
+            1333,
+            1271,
+            1335,
+            1300,
+            1014,
+            1042,
+            1122,
+            1136,
+            1523,
+            1357,
+            1169,
+            1242,
+            1126,
+            998,
+            327
+          ],
+          "tableBytesAfterRun": {
+            "steps": 14581760,
+            "stepEvents": 20692992
+          },
+          "wal": {
+            "walBytes": 84388920,
+            "walRecords": 762440,
+            "walFullPageImages": 39,
+            "bytesPerTask": 2344
+          },
+          "autovacuumDuringRun": {
+            "steps": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 60884
+            },
+            "step_events": {
+              "autovacuumRuns": 1,
+              "autoanalyzeRuns": 1,
+              "deadTuplesAtEnd": 0
+            }
+          },
+          "loadAverage": {
+            "before": [
+              9.99,
+              18.66,
+              21.17
+            ],
+            "after": [
+              10.3,
+              17.92,
+              20.82
+            ]
+          },
+          "processes": {
+            "exitCodes": {
+              "coordinator": 0,
+              "bench-worker-1": 0,
+              "bench-worker-2": 0,
+              "bench-worker-3": 0,
+              "bench-worker-4": 0,
+              "bench-worker-5": 0,
+              "bench-worker-6": 0,
+              "bench-worker-7": 0,
+              "bench-worker-8": 0
+            },
+            "stderrLines": 0,
+            "stderrSample": []
+          }
+        }
+      ],
+      "summary": [
+        {
+          "workers": 8,
+          "runs": 3,
+          "tasksPerSecond": {
+            "median": 1188.1,
+            "min": 1185.7,
+            "max": 1194.8,
+            "spreadPercentOfMedian": 0.8
+          },
+          "endToEndP50MsMedian": 260.88,
+          "endToEndP95MsMedian": 502.49,
+          "endToEndP99MsMedian": 519.18,
+          "claimToCompletionP50MsMedian": 1.34,
+          "claimToCompletionP95MsMedian": 3.47,
+          "claimToCompletionP99MsMedian": 8.12,
+          "allTasksSucceeded": true
+        }
+      ]
+    },
+    "contention": {
+      "config": {
+        "processes": 4,
+        "claimersPerProcess": 16,
+        "backlogSteps": 100000,
+        "churn": {
+          "hotSteps": 32,
+          "targetGrants": 100000,
+          "leaseMs": 1,
+          "sweepers": 2
+        }
+      },
+      "backlog": {
+        "description": "fresh backlog: every READY row claimed once by concurrent independent sessions",
+        "steps": 100000,
+        "leaseMs": 600000,
+        "claimers": 64,
+        "attemptedClaims": 101212,
+        "successfulClaims": 100000,
+        "emptyClaims": 1212,
+        "claimConsistencyErrors": 0,
+        "otherErrors": 0,
+        "otherErrorSamples": [],
+        "claimersWithAtLeastOneGrant": 64,
+        "minGrantsPerClaimer": 1347,
+        "maxGrantsPerClaimer": 1782,
+        "wallSecondsHarness": 21.712,
+        "wallSecondsFirstToLastClaimEvent": 21.526,
+        "successfulClaimsPerSecond": 4646,
+        "ownership": {
+          "clientObservedGrants": 100000,
+          "distinctGenerationsGranted": 100000,
+          "duplicateOwnershipGrants": 0,
+          "duplicateGrantSamples": [],
+          "durableClaimEvents": 100000,
+          "duplicateClaimEvents": 0,
+          "clientGrantsWithoutMatchingEvent": 0,
+          "eventsWithoutClientGrant": 0,
+          "stepRows": 100000,
+          "rowsWithGenerationMismatch": 0,
+          "runningRowsWithWrongOwner": 0,
+          "generationsPerStep": {
+            "min": 1,
+            "max": 1,
+            "mean": 1
+          }
+        },
+        "processes": {
+          "exitCodes": {
+            "backlog-claimer-1": 0,
+            "backlog-claimer-2": 0,
+            "backlog-claimer-3": 0,
+            "backlog-claimer-4": 0
+          },
+          "stderrLines": 0
+        }
+      },
+      "churn": {
+        "description": "hot-row churn: many sessions repeatedly re-claiming a few rows across successive ownership generations",
+        "hotSteps": 32,
+        "leaseMs": 1,
+        "sweepers": 2,
+        "claimers": 64,
+        "attemptedClaims": 1476831,
+        "successfulClaims": 100324,
+        "emptyClaims": 1376507,
+        "claimConsistencyErrors": 0,
+        "otherErrors": 0,
+        "otherErrorSamples": [],
+        "claimersWithAtLeastOneGrant": 64,
+        "minGrantsPerClaimer": 1471,
+        "maxGrantsPerClaimer": 1666,
+        "recoverySweeps": 75317,
+        "recoveredBySweepers": 100324,
+        "sweeperErrors": 0,
+        "durableLeaseRecoveredEvents": 100324,
+        "wallSecondsHarness": 116.166,
+        "wallSecondsFirstToLastClaimEvent": 116.047,
+        "successfulClaimsPerSecond": 865,
+        "ownership": {
+          "clientObservedGrants": 100324,
+          "distinctGenerationsGranted": 100324,
+          "duplicateOwnershipGrants": 0,
+          "duplicateGrantSamples": [],
+          "durableClaimEvents": 100324,
+          "duplicateClaimEvents": 0,
+          "clientGrantsWithoutMatchingEvent": 0,
+          "eventsWithoutClientGrant": 0,
+          "stepRows": 32,
+          "rowsWithGenerationMismatch": 0,
+          "runningRowsWithWrongOwner": 0,
+          "generationsPerStep": {
+            "min": 2920,
+            "max": 3907,
+            "mean": 3135.1
+          }
+        },
+        "processes": {
+          "exitCodes": {
+            "churn-claimer-1": 0,
+            "churn-claimer-2": 0,
+            "churn-claimer-3": 0,
+            "churn-claimer-4": 0
+          },
+          "stderrLines": 0
+        }
+      }
+    },
+    "stale": {
+      "config": {
+        "scenarios": 500,
+        "aLeaseMs": 250,
+        "variants": "worker-id reuse on odd scenarios; concurrent stale/successor completion on every other pair"
+      },
+      "scenariosAttempted": 500,
+      "recoveriesCompleted": 500,
+      "reassignmentsCompleted": 500,
+      "successorCompletions": 500,
+      "liveRenewalsSucceeded": 500,
+      "staleAttemptsTotal": 4750,
+      "staleRenewalAttempts": 1500,
+      "staleCompletionAttempts": 1750,
+      "staleFailureReportAttempts": 1500,
+      "staleAttemptsByPhase": {
+        "expiredBeforeRecovery": {
+          "renewal": 500,
+          "completion": 500,
+          "failureReport": 500
+        },
+        "successorLive": {
+          "renewal": 500,
+          "completion": 750,
+          "failureReport": 500
+        },
+        "afterSuccessorCompleted": {
+          "renewal": 500,
+          "completion": 500,
+          "failureReport": 500
+        }
+      },
+      "staleWritesAccepted": 0,
+      "staleRejectionsThatChangedTheRow": 0,
+      "scenariosWithFinalStateCorruption": 0,
+      "unexpectedFailures": 0,
+      "unexpectedSamples": [],
+      "wallSeconds": 150.03
+    },
+    "idempotency": {
+      "config": {
+        "logicalKeys": 5000,
+        "concurrentExecutions": 8,
+        "claimLoops": 4,
+        "workerLoops": 4,
+        "gen1LeaseMs": 200
+      },
+      "logicalEffectsRequested": 5000,
+      "executionsTotal": 45000,
+      "phase1": {
+        "claims": 5000,
+        "concurrentExecutions": 40000,
+        "executorErrors": 0,
+        "errorSamples": [],
+        "appliedTrue": 5000,
+        "appliedFalseReturnedStored": 35000,
+        "keysWithoutExactlyOneApplied": 0,
+        "keysWithMultipleObservedEffectIds": 0,
+        "observedIdsDifferingFromStored": 0,
+        "durableEffectsAfterPhase": 5000
+      },
+      "phase2": {
+        "recoveredToReady": 5000
+      },
+      "phase3": {
+        "conflictingRequestAttempts": 5000,
+        "conflictingKeyRejections": 5000,
+        "conflictingRequestsAccepted": 0,
+        "storedEffectsUnchanged": true
+      },
+      "phase4": {
+        "workerLoopExecutions": 5000,
+        "effectsCreated": 0,
+        "workerLoopErrorsLogged": 0
+      },
+      "durableEffectRows": 5000,
+      "keysWithMoreThanOneDurableRow": 0,
+      "duplicateLogicalEffects": 0,
+      "finalSucceededSteps": 5000,
+      "stepResultsMatchingStoredEffect": 5000,
+      "stepsWithoutEffect": 0,
+      "stepsNotAtGeneration2": 0,
+      "stepsWithUnexpectedEventHistory": 0,
+      "wallSeconds": 7.86
+    },
+    "eventOverhead": {
+      "config": {
+        "tasks": 20000,
+        "loops": 8,
+        "repetitions": 3
+      },
+      "warmupExcludedFromMedians": [
+        {
+          "variant": "events",
+          "completed": 2000,
+          "succeededRows": 2000,
+          "eventRows": 4000,
+          "seconds": 0.703,
+          "tasksPerSecond": 2843.7
+        },
+        {
+          "variant": "no-events",
+          "completed": 2000,
+          "succeededRows": 2000,
+          "eventRows": 0,
+          "seconds": 0.501,
+          "tasksPerSecond": 3988.2
+        }
+      ],
+      "trials": [
+        {
+          "variant": "events",
+          "completed": 20000,
+          "succeededRows": 20000,
+          "eventRows": 40000,
+          "seconds": 6.05,
+          "tasksPerSecond": 3305.8
+        },
+        {
+          "variant": "no-events",
+          "completed": 20000,
+          "succeededRows": 20000,
+          "eventRows": 0,
+          "seconds": 4.832,
+          "tasksPerSecond": 4138.7
+        },
+        {
+          "variant": "events",
+          "completed": 20000,
+          "succeededRows": 20000,
+          "eventRows": 40000,
+          "seconds": 6.098,
+          "tasksPerSecond": 3279.7
+        },
+        {
+          "variant": "no-events",
+          "completed": 20000,
+          "succeededRows": 20000,
+          "eventRows": 0,
+          "seconds": 4.906,
+          "tasksPerSecond": 4076.7
+        },
+        {
+          "variant": "events",
+          "completed": 20000,
+          "succeededRows": 20000,
+          "eventRows": 40000,
+          "seconds": 6.873,
+          "tasksPerSecond": 2910
+        },
+        {
+          "variant": "no-events",
+          "completed": 20000,
+          "succeededRows": 20000,
+          "eventRows": 0,
+          "seconds": 5.5,
+          "tasksPerSecond": 3636.1
+        }
+      ],
+      "medianTasksPerSecond": {
+        "events": 3279.7,
+        "noEventsBenchmarkOnly": 4076.7
+      },
+      "eventsThroughputRelativeToNoEvents": 0.804
+    }
+  }
+}
