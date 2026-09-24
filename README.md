@@ -82,8 +82,9 @@ older generation, rejected.
   down, recovery is late, but nobody gains authority they shouldn't have.
 - **The API** is a Fastify server, and its HTTP surface is intentionally
   small: a health check, plus durable event history over REST and
-  Server-Sent Events. The React/Vite frontend is currently a diagnostic page
-  showing health and the live event feed.
+  Server-Sent Events. The React/Vite frontend is a landing page that
+  explains the design and the validated results, with live health and the
+  event stream at the bottom.
 
 Workers claim tasks with `SELECT ... FOR UPDATE SKIP LOCKED`, followed by an
 `UPDATE` that sets the owner, increments `lease_version` and `attempt_count`,
@@ -308,7 +309,9 @@ but stops making progress.
 
 ## Running it locally
 
-You'll need Node 20.12+ and PostgreSQL (I've tested against 16).
+You'll need Node 24 (the supported runtime; `.nvmrc` pins it) and
+PostgreSQL (I've tested against 16). The benchmark numbers above were
+measured on Node 20.19.4 and haven't been rerun on 24.
 
 ```bash
 npm install

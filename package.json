@@ -2,6 +2,9 @@
   "name": "durable-runner",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "dev:server": "tsx watch server/src/index.ts",
     "dev:web": "vite web --config web/vite.config.ts",
