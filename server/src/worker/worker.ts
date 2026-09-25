@@ -1,7 +1,7 @@
 import "../load-env.js";
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { createDbPool } from "../db/pool-config.js";
 import { registerWorker } from "../db/worker-heartbeat.js";
 import { runHeartbeatLoop } from "./heartbeat-loop.js";
 import { runWorkerLoop, WORKER_POLL_INTERVAL_MS } from "./worker-loop.js";
@@ -25,7 +25,7 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL is not set");
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = createDbPool(process.env.DATABASE_URL);
 const db = drizzle(pool);
 
 // Two signals, stopped in order. The heartbeat keeps running until the

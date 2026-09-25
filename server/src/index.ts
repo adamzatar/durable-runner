@@ -4,7 +4,8 @@ import path from "node:path";
 import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import { registerHealthRoute } from "./api/health.js";
-import { registerEventsRoute } from "./api/events.js";
+import { closeOpenEventStreams, registerEventsRoute } from "./api/events.js";
+import { pool } from "./db/client.js";
 
 const app = Fastify({ logger: true });
 
@@ -29,3 +30,34 @@ if (existsSync(webDist)) {
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? "0.0.0.0";
 await app.listen({ port, host });
+
+// Graceful shutdown, to the same standard as the worker and coordinator:
+// stop accepting new connections, let in-flight work finish, then close the
+// pool. app.close() waits for in-flight handlers, and an SSE handler never
+// finishes on its own, so open event streams are aborted first — their
+// polling loops exit within one poll interval and close() can complete.
+// No forced-exit timer: every long-lived response has an explicit close
+// path, and a shutdown that hangs should be investigated, not papered over.
+let shutdownStarted = false;
+
+async function shutdown(signal: string) {
+  // A second signal must not start a competing shutdown over the first.
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  app.log.info(`received ${signal}, shutting down`);
+  closeOpenEventStreams();
+  await app.close();
+  await pool.end();
+  app.log.info("shutdown complete, pool closed");
+  process.exit(0);
+}
+
+function onSignal(signal: "SIGTERM" | "SIGINT") {
+  shutdown(signal).catch((error) => {
+    console.error(`fatal error during ${signal} shutdown`, error);
+    process.exit(1);
+  });
+}
+
+process.on("SIGTERM", () => onSignal("SIGTERM"));
+process.on("SIGINT", () => onSignal("SIGINT"));

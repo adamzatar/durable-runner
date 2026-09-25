@@ -1,5 +1,5 @@
-import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { createDbPool } from "./pool-config.js";
 import * as schema from "./schema.js";
 
 if (!process.env.DATABASE_URL) {
@@ -10,6 +10,6 @@ if (!process.env.DATABASE_URL) {
 // this is the mechanism by which independent processes each get their own
 // connection to the single shared coordination store (Postgres), never a
 // connection shared over IPC.
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+export const pool = createDbPool(process.env.DATABASE_URL);
 
 export const db = drizzle(pool, { schema });

@@ -1,6 +1,6 @@
 import "../load-env.js";
-import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { createDbPool } from "../db/pool-config.js";
 import { RECOVERY_SWEEP_INTERVAL_MS, runRecoveryLoop } from "./recovery-loop.js";
 
 // Coordinator process entrypoint: lease-expiry recovery and due retry
@@ -17,7 +17,7 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL is not set");
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = createDbPool(process.env.DATABASE_URL);
 const db = drizzle(pool);
 const controller = new AbortController();
 

@@ -23,11 +23,21 @@ const STREAM_PAGE_SIZE = 200;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Open streams, so shutdown and tests can see that a disconnect actually
-// stopped its polling loop rather than leaving it running.
-let openStreams = 0;
+// Open streams' abort controllers, so shutdown and tests can see that a
+// disconnect actually stopped its polling loop rather than leaving it
+// running — and so API shutdown can end every stream deliberately.
+const streamControllers = new Set<AbortController>();
 export function openEventStreamCount(): number {
-  return openStreams;
+  return streamControllers.size;
+}
+
+// Aborts every open event stream so its polling loop exits and its handler
+// completes. Called once during API shutdown before app.close(), which
+// would otherwise wait forever on streams that never finish on their own.
+export function closeOpenEventStreams(): void {
+  for (const controller of streamControllers) {
+    controller.abort();
+  }
 }
 
 interface ParsedQuery {
@@ -183,7 +193,7 @@ export async function registerEventsRoute(app: FastifyInstance) {
 
     const controller = new AbortController();
     const { signal } = controller;
-    openStreams += 1;
+    streamControllers.add(controller);
 
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -222,7 +232,7 @@ export async function registerEventsRoute(app: FastifyInstance) {
       // the client reconnects with its last id and loses nothing.
       request.log.error({ err: error }, "event stream failed");
     } finally {
-      openStreams -= 1;
+      streamControllers.delete(controller);
       reply.raw.end();
     }
   });
