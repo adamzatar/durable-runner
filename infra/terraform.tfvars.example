@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Alternatively export
+# TF_VAR_<name> variables instead of creating the file.
+
+# Keep false for the first apply. Set true only after the "Project" tag has
+# been activated as a cost allocation tag in Billing (see budget.tf); the
+# email is then required.
+enable_budget = false
+# budget_alert_email = "you@example.com"
+
+# The billable RDS instance. true creates it; switching back to false
+# DESTROYS it and all its data (no final snapshot). The DB subnet group is
+# unaffected either way.
+enable_database = false
+
+# Defaults, shown for reference:
+# aws_region = "us-east-1"
+# name       = "durable-runner-dev"

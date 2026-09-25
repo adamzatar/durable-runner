@@ -4,3 +4,20 @@ dist/
 .env.local
 *.log
 .DS_Store
+
+# Terraform: provider binaries, local state (which stores variable values,
+# including the budget email, in plaintext), plan files and real tfvars stay
+# local. infra/.terraform.lock.hcl and infra/terraform.tfvars.example are
+# deliberately tracked.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
