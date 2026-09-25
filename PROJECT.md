@@ -7,8 +7,9 @@ concurrency-safe claiming, worker heartbeats/leases, fencing against stale
 workers, retries with backoff, idempotent side effects, and durable event
 history served over REST and Server-Sent Events (SSE). Grouping steps into
 multi-step runs and a separate verification step after execution are
-planned, not implemented. The React frontend is currently a diagnostic page
-(health plus the live event feed), not an operational console.
+planned, not implemented. The React frontend is a small landing page that
+explains the failure model and the validated results, with the live health
+and event feed kept on the page. It is not an operational console.
 
 This is a learning/demo project built to understand and be able to defend,
 in detail, the mechanics of durable task execution and failure recovery. It
