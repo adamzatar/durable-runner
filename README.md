@@ -81,8 +81,8 @@ older generation, rejected.
   has elapsed back to `READY`. It never decides who owns a task. If it's
   down, recovery is late, but nobody gains authority they shouldn't have.
 - **The API** is a Fastify server, and its HTTP surface is intentionally
-  small: a health check, plus durable event history over REST and
-  Server-Sent Events. The React/Vite frontend is a landing page that
+  small: liveness/readiness health checks, plus durable event history over
+  REST and Server-Sent Events. The React/Vite frontend is a landing page that
   explains the design and the validated results, with live health and the
   event stream at the bottom.
 
@@ -344,6 +344,38 @@ core count. Its power and memory-pressure checks (battery, Low Power Mode,
 low free memory) use macOS tools and are skipped elsewhere, so the full
 benchmark workflow currently targets macOS. Details are in
 [`benchmarks/README.md`](benchmarks/README.md).
+
+## Running with Docker
+
+One multi-stage [Dockerfile](Dockerfile) builds a single Node 24 image that
+runs every role. The image carries only production dependencies, the compiled
+server, the built frontend and the Drizzle migration SQL, and it runs as the
+non-root `node` user. `DATABASE_URL` is supplied at runtime; no credentials
+or `.env` files enter the image.
+
+```bash
+docker build -t durable-runner .
+```
+
+Every role runs from the same image, with the API as the default command:
+
+```bash
+docker run -e DATABASE_URL=... -p 3000:3000 durable-runner                              # API + frontend
+docker run -e DATABASE_URL=... durable-runner node dist/server/src/worker/worker.js     # worker
+docker run -e DATABASE_URL=... durable-runner node dist/server/src/coordinator/coordinator.js
+docker run -e DATABASE_URL=... durable-runner node dist/server/src/db/migrate.js        # apply migrations
+```
+
+The API exposes `/api/health/live` (process answers HTTP, no dependency
+checks) and `/api/health/ready` (200 when PostgreSQL is reachable, 503
+otherwise, with error details logged server-side rather than returned).
+There is deliberately no image-level `HEALTHCHECK`: the same image runs the
+worker/coordinator/migration roles, which listen on no port, so a baked-in
+check would misreport them — the checks belong to whatever runs the API
+container. All roles shut down cleanly on SIGTERM: the API stops accepting
+connections, ends open SSE streams, closes Fastify and its pool, and exits
+0. Each process sizes its PostgreSQL pool from `DB_POOL_MAX` (optional,
+positive integer, default 4).
 
 ## Where to look
 

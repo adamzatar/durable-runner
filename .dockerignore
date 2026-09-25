@@ -1,0 +1,32 @@
+# Version control / editor / OS noise
+.git
+.claude
+.DS_Store
+*.log
+
+# Generated build artifacts — always rebuilt inside the image
+node_modules
+dist
+web/dist
+coverage
+
+# Local environment files may contain database credentials and must never
+# enter the build context. The placeholder template stays available.
+.env
+.env.*
+!.env.example
+
+# Not needed to build or run the services. infra/ also holds the Terraform
+# provider binary, local state and tfvars once initialized.
+infra
+benchmarks
+docs
+tasks
+drizzle.config.ts
+vitest.config.ts
+Dockerfile
+.dockerignore
+AGENTS.md
+CLAUDE.md
+PROJECT.md
+README.md
