@@ -8,8 +8,13 @@ import { fileURLToPath } from "node:url";
 // under tsx since this is the dev/test environment), opens an SSE stream,
 // sends SIGTERM, and verifies the whole graceful-shutdown chain: listener
 // stops, open stream ends instead of hanging, pool closes, exit code 0.
+//
+// The server runs as `node --import tsx`, not via the tsx CLI: the CLI
+// spawns the server as a grandchild and only relays catchable signals, so a
+// SIGKILL in cleanup killed the wrapper and orphaned the real server on
+// PORT. Spawning node directly makes `child` the process that listens.
 
-const tsxBin = fileURLToPath(new URL("../../node_modules/.bin/tsx", import.meta.url));
+const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const serverEntry = fileURLToPath(new URL("../src/index.ts", import.meta.url));
 const PORT = 34441;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -42,7 +47,11 @@ async function waitForServer(timeoutMs: number): Promise<void> {
 
 describe("API graceful shutdown", () => {
   it("drains SSE, closes the pool and exits 0 on SIGTERM", async () => {
-    const child = spawn(tsxBin, [serverEntry], {
+    // cwd is the repo root so `--import tsx` resolves from this repo's
+    // node_modules, and the server's cwd-relative paths (.env, web/dist)
+    // match `npm start`.
+    const child = spawn(process.execPath, ["--import", "tsx", serverEntry], {
+      cwd: repoRoot,
       env: { ...process.env, PORT: String(PORT) },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -107,7 +116,14 @@ describe("API graceful shutdown", () => {
       // The listener is gone.
       await expect(httpGet("/api/health/live")).rejects.toThrow();
     } finally {
-      if (child.exitCode === null) child.kill("SIGKILL");
+      // Fallback only: on the passing path the process already exited from
+      // SIGTERM. Wait for the exit so the port is released before the next
+      // test or run binds it.
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = new Promise((resolve) => child.once("exit", resolve));
+        child.kill("SIGKILL");
+        await exited;
+      }
     }
   }, 60_000);
 });
