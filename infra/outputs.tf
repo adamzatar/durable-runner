@@ -62,3 +62,16 @@ output "db_engine_version_actual" {
 output "db_master_user_secret_arn" {
   value = try(aws_db_instance.main[0].master_user_secret[0].secret_arn, null)
 }
+
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.main.name
+}
+
+output "ecs_log_group_name" {
+  value = aws_cloudwatch_log_group.ecs.name
+}
+
+# null until both enable_database and image_tag are set.
+output "migration_task_definition_arn" {
+  value = one(aws_ecs_task_definition.migrate[*].arn)
+}

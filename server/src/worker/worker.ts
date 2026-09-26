@@ -1,6 +1,7 @@
 import "../load-env.js";
 import { randomUUID } from "node:crypto";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { resolveDbConnectionConfig } from "../db/connection-config.js";
 import { createDbPool } from "../db/pool-config.js";
 import { registerWorker } from "../db/worker-heartbeat.js";
 import { runHeartbeatLoop } from "./heartbeat-loop.js";
@@ -11,7 +12,7 @@ import { runWorkerLoop, WORKER_POLL_INTERVAL_MS } from "./worker-loop.js";
 // claiming or execution.
 //
 // Coordination is exclusively through Postgres: this process takes no
-// input besides its worker ID and DATABASE_URL, and sends nothing back to
+// input besides its worker ID and database settings, and sends nothing back to
 // a parent process over IPC. A coordinator only ever learns what this
 // worker did by reading rows back from the database.
 //
@@ -21,11 +22,7 @@ import { runWorkerLoop, WORKER_POLL_INTERVAL_MS } from "./worker-loop.js";
 // any coordination decision.
 const workerId = process.argv[2] ?? process.env.WORKER_ID ?? `worker-${randomUUID()}`;
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL is not set");
-}
-
-const pool = createDbPool(process.env.DATABASE_URL);
+const pool = createDbPool(resolveDbConnectionConfig());
 const db = drizzle(pool);
 
 // Two signals, stopped in order. The heartbeat keeps running until the

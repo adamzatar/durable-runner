@@ -12,6 +12,7 @@
 // process via the environment.
 
 import { Pool } from "pg";
+import type { DbConnectionConfig } from "./connection-config.js";
 
 export const DEFAULT_DB_POOL_MAX = 4;
 
@@ -25,9 +26,9 @@ export function parseDbPoolMax(raw: string | undefined): number {
   return Number(raw);
 }
 
-export function createDbPool(connectionString: string): Pool {
+export function createDbPool(connection: DbConnectionConfig): Pool {
   const pool = new Pool({
-    connectionString,
+    ...connection,
     max: parseDbPoolMax(process.env.DB_POOL_MAX),
   });
   // An idle pooled connection can be killed at any time: server restart,

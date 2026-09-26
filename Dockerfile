@@ -43,6 +43,11 @@ COPY --from=build /app/dist/server ./dist/server
 # migration artifacts are therefore copied to the exact path the compiled
 # code expects, as packaging, without touching application code.
 COPY server/drizzle ./dist/server/drizzle
+# CA bundle for verifying the RDS server certificate on the cloud (DB_*)
+# connection path; ECS task definitions set DB_SSL_CA_FILE to this path.
+# Checked into the repo (provenance in server/certs/README.md) rather than
+# downloaded here, so every build packages the same reviewed file.
+COPY server/certs/rds-global-bundle.pem ./certs/rds-global-bundle.pem
 # The API resolves web/dist from process.cwd(); WORKDIR is /app, so the
 # built frontend must land at /app/web/dist.
 COPY --from=build /app/web/dist ./web/dist

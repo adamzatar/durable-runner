@@ -45,3 +45,14 @@ variable "db_allocated_storage" {
   type        = number
   default     = 20
 }
+
+variable "image_tag" {
+  description = "Full 40-character Git commit SHA the ECR image was pushed under; task definitions run that exact image. null (the default) creates no task definition. Supplied per plan (-var or TF_VAR_image_tag), not stored in tfvars."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.image_tag == null || can(regex("^[0-9a-f]{40}$", var.image_tag))
+    error_message = "image_tag must be a full 40-character lowercase Git commit SHA."
+  }
+}

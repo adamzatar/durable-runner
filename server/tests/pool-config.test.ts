@@ -21,7 +21,7 @@ describe("parseDbPoolMax", () => {
 
 describe("createDbPool", () => {
   it("applies the parsed limit and handles idle-connection errors instead of crashing", async () => {
-    const pool = createDbPool("postgres://unused.invalid/db");
+    const pool = createDbPool({ connectionString: "postgres://unused.invalid/db" });
     try {
       expect(pool.options.max).toBe(DEFAULT_DB_POOL_MAX);
       // Without a listener, an idle client death is emitted as an unhandled

@@ -1,5 +1,6 @@
 import "../load-env.js";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { resolveDbConnectionConfig } from "../db/connection-config.js";
 import { createDbPool } from "../db/pool-config.js";
 import { RECOVERY_SWEEP_INTERVAL_MS, runRecoveryLoop } from "./recovery-loop.js";
 
@@ -13,11 +14,7 @@ import { RECOVERY_SWEEP_INTERVAL_MS, runRecoveryLoop } from "./recovery-loop.js"
 // through PostgreSQL rows. It does not know which workers exist, does not
 // read heartbeats, and does not signal workers.
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL is not set");
-}
-
-const pool = createDbPool(process.env.DATABASE_URL);
+const pool = createDbPool(resolveDbConnectionConfig());
 const db = drizzle(pool);
 const controller = new AbortController();
 
