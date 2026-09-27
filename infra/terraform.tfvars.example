@@ -12,6 +12,13 @@ enable_budget = false
 # unaffected either way.
 enable_database = false
 
+# The ALB plus the API, worker and coordinator ECS services. Requires
+# enable_database = true and image_tag (usually passed with -var). The ALB
+# bills by the hour even with every service scaled to zero; false removes
+# it and the services. Desired counts: api_desired_count,
+# worker_desired_count, coordinator_desired_count (default 1 each).
+enable_services = false
+
 # Defaults, shown for reference:
 # aws_region = "us-east-1"
 # name       = "durable-runner-dev"

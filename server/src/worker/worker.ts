@@ -22,14 +22,29 @@ import { runWorkerLoop, WORKER_POLL_INTERVAL_MS } from "./worker-loop.js";
 // any coordination decision.
 const workerId = process.argv[2] ?? process.env.WORKER_ID ?? `worker-${randomUUID()}`;
 
-const pool = createDbPool(resolveDbConnectionConfig());
-const db = drizzle(pool);
-
 // Two signals, stopped in order. The heartbeat keeps running until the
 // work loop has fully returned, so a worker finishing its last step during
 // a graceful shutdown still shows up as alive while it does.
 const workController = new AbortController();
 const heartbeatController = new AbortController();
+let exitCode = 0;
+
+// A rejected password means RDS has rotated it since this task started (see
+// db/pool-config.ts). A failed claim already ends the process, but the
+// heartbeat and lease renewal log and carry on, so a worker could otherwise
+// keep running on its remaining open connections without being replaced.
+// This takes the same path as SIGTERM: the current step, if any, gets to
+// finish on those connections, then the process exits non-zero and ECS
+// starts a replacement with the current password.
+const pool = createDbPool(resolveDbConnectionConfig(), {
+  onCredentialRejected: () => {
+    if (workController.signal.aborted) return;
+    exitCode = 1;
+    console.error(`[${workerId}] database rejected the password (SQLSTATE 28P01); finishing current step (if any) then stopping`);
+    workController.abort();
+  },
+});
+const db = drizzle(pool);
 
 function shutdown(signal: string) {
   console.log(`[${workerId}] received ${signal}, finishing current step (if any) then stopping`);
@@ -60,7 +75,7 @@ async function main() {
 main()
   .then(() => {
     console.log(`[${workerId}] stopped, pool closed`);
-    process.exit(0);
+    process.exit(exitCode);
   })
   .catch((error) => {
     console.error(`[${workerId}] fatal error`, error);

@@ -11,10 +11,65 @@
 // scale without hardcoding per-role values — deployments override per
 // process via the environment.
 
-import { Pool } from "pg";
+import { Client, Pool } from "pg";
 import type { DbConnectionConfig } from "./connection-config.js";
 
 export const DEFAULT_DB_POOL_MAX = 4;
+
+// PostgreSQL's SQLSTATE for "password authentication failed". It is what a
+// new connection gets after RDS has rotated the password this process was
+// started with.
+export const INVALID_PASSWORD_SQLSTATE = "28P01";
+
+export function isCredentialRejected(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === INVALID_PASSWORD_SQLSTATE;
+}
+
+export interface DbPoolOptions {
+  // Called each time PostgreSQL rejects the configured password while the
+  // pool opens a new connection. The error still reaches whoever asked for
+  // the connection; this only lets the process react as a whole.
+  //
+  // Why it exists: on ECS the password is injected once, at task start, and
+  // RDS rotates it every 7 days. Rotation doesn't end sessions that are
+  // already open, so a process keeps working until it needs a *new*
+  // connection, and from then on every new connection fails. A loop that
+  // logs and retries (the coordinator, the worker heartbeat, API readiness)
+  // would do that forever while ECS still sees a running task. Exiting
+  // instead makes ECS start a replacement, which resolves the secret again
+  // and gets the current password. Only 28P01 triggers this: other
+  // connection failures (network, a restarting database) are transient and
+  // stay the retry loops' business. See docs/cloud-architecture.md.
+  onCredentialRejected?: (error: Error) => void;
+}
+
+// pg.Pool builds every connection through the Client class it is given.
+// Wrapping connect() here sees every connection attempt the pool makes,
+// including those behind pool.query(), without each caller having to
+// recognize the error.
+type ConnectCallback = Parameters<Client["connect"]>[0] & {};
+
+function clientReportingRejectedCredentials(onRejected: (error: Error) => void): typeof Client {
+  return class extends Client {
+    // pg-pool 3.x calls the callback form; the promise form is covered too
+    // so the behavior doesn't depend on which one a pg version uses.
+    override connect(): Promise<Client>;
+    override connect(callback: ConnectCallback): void;
+    override connect(callback?: ConnectCallback): Promise<Client> | void {
+      if (callback) {
+        super.connect((err: Error | null, client?: Client) => {
+          if (err && isCredentialRejected(err)) onRejected(err);
+          (callback as (err: Error | null, client?: Client) => void)(err, client);
+        });
+        return;
+      }
+      return super.connect().catch((err: unknown) => {
+        if (isCredentialRejected(err)) onRejected(err as Error);
+        throw err;
+      });
+    }
+  };
+}
 
 export function parseDbPoolMax(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === "") return DEFAULT_DB_POOL_MAX;
@@ -26,10 +81,11 @@ export function parseDbPoolMax(raw: string | undefined): number {
   return Number(raw);
 }
 
-export function createDbPool(connection: DbConnectionConfig): Pool {
+export function createDbPool(connection: DbConnectionConfig, options: DbPoolOptions = {}): Pool {
   const pool = new Pool({
     ...connection,
     max: parseDbPoolMax(process.env.DB_POOL_MAX),
+    ...(options.onCredentialRejected ? { Client: clientReportingRejectedCredentials(options.onCredentialRejected) } : {}),
   });
   // An idle pooled connection can be killed at any time: server restart,
   // network drop, server-side idle timeout. pg.Pool re-emits that as an

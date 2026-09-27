@@ -56,3 +56,51 @@ variable "image_tag" {
     error_message = "image_tag must be a full 40-character lowercase Git commit SHA."
   }
 }
+
+variable "enable_services" {
+  description = "Whether the ALB and the API, worker and coordinator ECS services exist. The ALB bills by the hour whether or not any task runs; setting this false removes it along with the services. Requires enable_database and image_tag."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.enable_services || (var.enable_database && var.image_tag != null)
+    error_message = "enable_services requires enable_database = true and image_tag set."
+  }
+}
+
+# Separate counts so each role can be scaled on its own, including to zero,
+# without touching the others or the ALB. The upper bounds are typo guards
+# for a cost-limited account, not capacity limits of the design.
+
+variable "api_desired_count" {
+  description = "Running API tasks. 0 keeps the ALB but serves nothing (the ALB answers 503)."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.api_desired_count >= 0 && var.api_desired_count <= 2 && floor(var.api_desired_count) == var.api_desired_count
+    error_message = "api_desired_count must be a whole number from 0 to 2."
+  }
+}
+
+variable "worker_desired_count" {
+  description = "Running worker tasks. Each runs one worker loop, which executes one step at a time."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.worker_desired_count >= 0 && var.worker_desired_count <= 8 && floor(var.worker_desired_count) == var.worker_desired_count
+    error_message = "worker_desired_count must be a whole number from 0 to 8."
+  }
+}
+
+variable "coordinator_desired_count" {
+  description = "Running coordinator tasks: 1, or 0 to stop lease recovery and retry promotion."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.coordinator_desired_count == 0 || var.coordinator_desired_count == 1
+    error_message = "coordinator_desired_count must be 0 or 1."
+  }
+}

@@ -14,9 +14,23 @@ import { RECOVERY_SWEEP_INTERVAL_MS, runRecoveryLoop } from "./recovery-loop.js"
 // through PostgreSQL rows. It does not know which workers exist, does not
 // read heartbeats, and does not signal workers.
 
-const pool = createDbPool(resolveDbConnectionConfig());
-const db = drizzle(pool);
 const controller = new AbortController();
+let exitCode = 0;
+
+// The recovery loop logs a failed sweep and tries again next tick, which is
+// right for a transient outage but would go on forever if the password has
+// been rotated since this process started. Stopping with a non-zero exit
+// lets ECS start a replacement that reads the current password (see
+// db/pool-config.ts).
+const pool = createDbPool(resolveDbConnectionConfig(), {
+  onCredentialRejected: () => {
+    if (controller.signal.aborted) return;
+    exitCode = 1;
+    console.error("[coordinator] database rejected the password (SQLSTATE 28P01); stopping so a replacement can start with the current credential");
+    controller.abort();
+  },
+});
+const db = drizzle(pool);
 
 function shutdown(signal: string) {
   console.log(`[coordinator] received ${signal}, stopping after the current sweep`);
@@ -32,7 +46,7 @@ runRecoveryLoop(db, { signal: controller.signal })
   .then(() => pool.end())
   .then(() => {
     console.log("[coordinator] stopped, pool closed");
-    process.exit(0);
+    process.exit(exitCode);
   })
   .catch((error) => {
     console.error("[coordinator] fatal error", error);

@@ -5,7 +5,7 @@ import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import { registerHealthRoute } from "./api/health.js";
 import { closeOpenEventStreams, registerEventsRoute } from "./api/events.js";
-import { pool } from "./db/client.js";
+import { onDbCredentialRejected, pool } from "./db/client.js";
 
 const app = Fastify({ logger: true });
 
@@ -40,24 +40,33 @@ await app.listen({ port, host });
 // path, and a shutdown that hangs should be investigated, not papered over.
 let shutdownStarted = false;
 
-async function shutdown(signal: string) {
+async function shutdown(exitCode: number) {
   // A second signal must not start a competing shutdown over the first.
   if (shutdownStarted) return;
   shutdownStarted = true;
-  app.log.info(`received ${signal}, shutting down`);
   closeOpenEventStreams();
   await app.close();
   await pool.end();
   app.log.info("shutdown complete, pool closed");
-  process.exit(0);
+  process.exit(exitCode);
 }
 
-function onSignal(signal: "SIGTERM" | "SIGINT") {
-  shutdown(signal).catch((error) => {
-    console.error(`fatal error during ${signal} shutdown`, error);
+function startShutdown(reason: string, exitCode: number) {
+  if (!shutdownStarted) app.log.info(`${reason}, shutting down`);
+  shutdown(exitCode).catch((error) => {
+    console.error(`fatal error during shutdown (${reason})`, error);
     process.exit(1);
   });
 }
 
-process.on("SIGTERM", () => onSignal("SIGTERM"));
-process.on("SIGINT", () => onSignal("SIGINT"));
+process.on("SIGTERM", () => startShutdown("received SIGTERM", 0));
+process.on("SIGINT", () => startShutdown("received SIGINT", 0));
+
+// A rejected password means RDS has rotated it since this task started;
+// every new pool connection will now fail, so readiness would report 503
+// indefinitely. Shutting down with a non-zero exit makes ECS start a
+// replacement task, which resolves the secret again and gets the current
+// password. See db/pool-config.ts and docs/cloud-architecture.md.
+onDbCredentialRejected(() => {
+  startShutdown("database rejected the password (SQLSTATE 28P01); replacement task needed", 1);
+});

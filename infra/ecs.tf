@@ -1,7 +1,7 @@
-# ECS foundation plus the one-off migration task definition. There is no
-# ECS service and no load balancer: nothing here runs until a task is
-# started explicitly with `aws ecs run-task`, and a cluster with no running
-# tasks costs nothing.
+# ECS foundation plus the one-off migration task definition. Nothing in this
+# file runs until a task is started explicitly with `aws ecs run-task`, and a
+# cluster with no running tasks costs nothing. The long-running services and
+# the ALB are in services.tf.
 
 resource "aws_ecs_cluster" "main" {
   name = var.name
@@ -110,6 +110,39 @@ resource "aws_iam_role_policy" "ecs_execution_db_secret" {
   })
 }
 
+# --- Database settings shared by every task definition -------------------------
+#
+# Cloud DB_* configuration (server/src/db/connection-config.ts), used by the
+# migration task here and the services in services.tf. Empty while the
+# instance is off; nothing that uses them exists then.
+#
+# Individual attributes only, never the whole instance object: it contains
+# sensitive attributes, and anything computed from it (even `== null`) is
+# marked sensitive, which would hide these task definitions from plan
+# review.
+locals {
+  # Not secret, so plain values, visible in the task definition. Listed
+  # alphabetically, the order ECS returns them in, so Terraform doesn't
+  # report a spurious diff.
+  db_environment = var.enable_database ? [
+    { name = "DB_HOST", value = aws_db_instance.main[0].address },
+    { name = "DB_NAME", value = aws_db_instance.main[0].db_name },
+    { name = "DB_PORT", value = tostring(aws_db_instance.main[0].port) },
+    # Where the Dockerfile packages the RDS CA bundle.
+    { name = "DB_SSL_CA_FILE", value = "/app/certs/rds-global-bundle.pem" },
+    { name = "DB_USER", value = aws_db_instance.main[0].username },
+  ] : []
+
+  # The password only, extracted from the secret's JSON by key. ECS resolves
+  # it once, at task start, using the execution role; it never appears in
+  # the task definition, Terraform state or plan. The secret ARN stays the
+  # same across rotations, so a task started after a rotation gets the new
+  # password with no change here.
+  db_secrets = var.enable_database ? [
+    { name = "DB_PASSWORD", valueFrom = "${aws_db_instance.main[0].master_user_secret[0].secret_arn}:password::" },
+  ] : []
+}
+
 # --- Migration task definition ---------------------------------------------------
 #
 # Runs `node dist/server/src/db/migrate.js` from the SHA-tagged image, then
@@ -147,27 +180,10 @@ resource "aws_ecs_task_definition" "migrate" {
     essential = true
     command   = ["node", "dist/server/src/db/migrate.js"]
 
-    # Cloud DB_* configuration (server/src/db/connection-config.ts). These
-    # are not secret, so they are plain values, visible in the task
-    # definition. Listed alphabetically, the order ECS returns them in, so
-    # Terraform doesn't report a spurious diff.
-    environment = [
-      { name = "DB_HOST", value = aws_db_instance.main[0].address },
-      { name = "DB_NAME", value = aws_db_instance.main[0].db_name },
-      { name = "DB_PORT", value = tostring(aws_db_instance.main[0].port) },
-      # Where the Dockerfile packages the RDS CA bundle.
-      { name = "DB_SSL_CA_FILE", value = "/app/certs/rds-global-bundle.pem" },
-      { name = "DB_USER", value = aws_db_instance.main[0].username },
-    ]
-
-    # The password only, extracted from the secret's JSON by key. ECS
-    # resolves it once, at task start, using the execution role; it never
-    # appears in the task definition, Terraform state or plan. A task
-    # started before a rotation keeps the old password, which is fine for a
-    # migration that runs for seconds.
-    secrets = [
-      { name = "DB_PASSWORD", valueFrom = "${aws_db_instance.main[0].master_user_secret[0].secret_arn}:password::" },
-    ]
+    # A task started before a rotation keeps the old password, which is fine
+    # for a migration that runs for seconds.
+    environment = local.db_environment
+    secrets     = local.db_secrets
 
     logConfiguration = {
       logDriver = "awslogs"

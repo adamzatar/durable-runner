@@ -75,3 +75,33 @@ output "ecs_log_group_name" {
 output "migration_task_definition_arn" {
   value = one(aws_ecs_task_definition.migrate[*].arn)
 }
+
+# The rest are null while enable_services is false.
+
+output "api_url" {
+  value = try("http://${aws_lb.api[0].dns_name}", null)
+}
+
+output "alb_arn" {
+  value = one(aws_lb.api[*].arn)
+}
+
+output "api_target_group_arn" {
+  value = one(aws_lb_target_group.api[*].arn)
+}
+
+output "ecs_service_names" {
+  value = var.enable_services ? {
+    api         = aws_ecs_service.api[0].name
+    worker      = aws_ecs_service.worker[0].name
+    coordinator = aws_ecs_service.coordinator[0].name
+  } : null
+}
+
+output "service_task_definition_arns" {
+  value = var.enable_services ? {
+    api         = aws_ecs_task_definition.api[0].arn
+    worker      = aws_ecs_task_definition.worker[0].arn
+    coordinator = aws_ecs_task_definition.coordinator[0].arn
+  } : null
+}

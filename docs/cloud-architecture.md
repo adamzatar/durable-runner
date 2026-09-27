@@ -10,12 +10,12 @@ events) is in [architecture.md](architecture.md) and doesn't change here.
 |---|---|---|---|
 | VPC, 4 subnets, IGW, route tables | yes | yes | **yes**, verified 2026-09-24 |
 | Security groups (alb, api, backend, rds) | yes | yes | **yes**, verified 2026-09-24 |
-| ECR repository `durable-runner` | yes | yes | **yes**, empty (no image pushed) |
+| ECR repository `durable-runner` | yes | yes | **yes**; one Git-SHA-tagged image pushed 2026-09-26 |
 | Budget alerts (filtered to `Project` tag) | yes | yes (`enable_budget = true` in local tfvars) | **yes**, verified 2026-09-25 |
-| ALB | yes | no | no |
-| ECS cluster, Fargate API / worker / coordinator / migration tasks | yes | no | no |
+| ECS cluster, execution role, log group, migration task definition | yes | yes (`ecs.tf`) | **yes**, control plane verified 2026-09-26; migration task **runtime verified** 2026-09-26 |
+| ALB, Fargate API / worker / coordinator services | yes | yes (`services.tf`, behind `enable_services`; not applied) | **no** |
 | RDS DB subnet group (private DB subnets) | yes | yes (`rds.tf`, always present) | **yes**, verified 2026-09-25 |
-| RDS PostgreSQL 16 instance (`db.t4g.micro`, private) | yes | yes (`rds.tf`, behind `enable_database`) | **yes**, control plane verified 2026-09-25; **SQL connectivity not yet verified** |
+| RDS PostgreSQL 16 instance (`db.t4g.micro`, private) | yes | yes (`rds.tf`, behind `enable_database`) | **yes**, control plane verified 2026-09-25; TLS SQL connectivity from Fargate **runtime verified** 2026-09-26 |
 | TLS (ACM), DNS (Route 53), CI/CD | later | no | no |
 
 On 2026-09-24 the reviewed plan was applied: 29 added, 0 changed, 0
@@ -27,9 +27,12 @@ are `us-east-1a` (`use1-az2`) and `us-east-1b` (`use1-az4`). `terraform
 output` (run in `infra/`) prints the resource IDs.
 
 Since 2026-09-25 the RDS instance runs here (see below). It has one
-network interface, with private address `10.0.11.44` and no public IP. No
-ALB or tasks exist yet, so the alb, api and backend security groups only
-define *who would be allowed*.
+network interface, with private address `10.0.11.44` and no public IP.
+Since 2026-09-26 one-off Fargate migration tasks have run in the backend
+security group and reached it (see
+[Migration task](#migration-task-phase-2d-runtime-verified)). No ALB and no
+long-running service exist yet, so the alb and api security groups still
+only define *who would be allowed*.
 
 AWS also created the VPC's *main* route table automatically. Terraform
 doesn't manage it, and no subnet uses it; it contains only the local
@@ -171,7 +174,7 @@ to. It sits in subnets with no internet route, accepts only 5432 from the
 api and backend groups, and gets no public address. There's no rule for a
 laptop; reaching it for debugging will go through a task inside the VPC.
 
-## RDS PostgreSQL (deployed; SQL connectivity not yet verified)
+## RDS PostgreSQL (deployed; reached from Fargate over verified TLS)
 
 `infra/rds.tf` defines one instance and its DB subnet group. On 2026-09-25
 the reviewed saved plan was applied: 2 added (`aws_db_subnet_group.main`,
@@ -200,9 +203,10 @@ What AWS reports:
   encrypted with `alias/aws/secretsmanager`. Its value was never read. The
   Terraform state holds only the ARN, with no password or URL.
 
-**SQL connectivity has not been verified, and no migrations have run.** No
-SQL client has connected. The first real test will be a one-off Fargate
-task in the backend security group.
+SQL connectivity was verified on 2026-09-26 from one-off Fargate tasks in
+the backend security group; see
+[Migration task](#migration-task-phase-2d-runtime-verified). No client
+outside the VPC has connected, and none can.
 
 | Setting | Value | Why |
 |---|---|---|
@@ -225,39 +229,29 @@ address in a DB subnet. That address has no internet route, and the `rds`
 group admits 5432 only from the `api` and `backend` groups. Anyone can
 resolve the name, but only our tasks can connect.
 
-**Future `DATABASE_URL` (ECS phase, not implemented).** The app reads a
-single `DATABASE_URL`. The pieces come from two places:
+**How tasks connect: separate `DB_*` variables, not a URL.** Locally the
+app still reads a single `DATABASE_URL`. On ECS it reads `DB_HOST`,
+`DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` and `DB_SSL_CA_FILE` instead
+(`server/src/db/connection-config.ts`; setting both shapes is an error).
+The non-secret values come from the Terraform-managed instance and are
+plain task-definition environment values. `DB_PASSWORD` is injected by ECS
+at task start from the RDS-managed secret's `password` JSON key, using the
+execution role. Passing separate fields to `pg` means the generated
+password is never percent-encoded into, or parsed back out of, a URL.
 
-- non-secret, from Terraform outputs (`db_address`, `db_port`, `db_name`,
-  `db_username`), which go into the task definition as plain environment
-  values;
-- secret, the password from the RDS-managed secret
-  (`db_master_user_secret_arn`, expected to be a JSON value with `username`
-  and `password` keys; check the key names, not the values, after apply). ECS injects it as an environment variable at task start via
-  the task definition's `secrets`. That needs an execution role allowed to
-  read that secret.
+**TLS is verified, not just enabled.** The default `postgres16` parameter
+group sets `rds.force_ssl = 1`, and the Amazon RDS CAs aren't in Node's
+default trust store. The image packages the RDS global CA bundle
+(`server/certs/rds-global-bundle.pem`, copied to
+`/app/certs/rds-global-bundle.pem`), and the cloud path gives `pg` exactly
+that bundle as its trust store, with `rejectUnauthorized: true` and an
+explicit hostname check against `DB_HOST`. That's the equivalent of libpq's
+`sslmode=verify-full`, with no opt-out. There is no `no-verify` path.
 
-Since the app wants one URL, the container has to assemble it at startup.
-That can be a small shell wrapper in the task command, or the app reading
-`PGPASSWORD` next to a password-less URL. That's a decision for the ECS
-phase. Three constraints for that phase:
-
-1. **TLS is mandatory.** The default `postgres16` parameter group sets
-   `rds.force_ssl = 1`. In the installed `pg` 8.23 / `pg-connection-string`
-   2.14, `sslmode=require` means full certificate verification, and the
-   Amazon RDS CA isn't in Node's default trust store. So a bare
-   `?sslmode=require` URL would fail certificate verification. The fix is
-   to ship the RDS CA bundle in the image (for example via
-   `NODE_EXTRA_CA_CERTS`) and use `sslmode=verify-full`. `no-verify` would
-   also connect, but it gives up server authentication. Not done yet,
-   because it can't be tested until something runs inside the VPC.
-2. **Rotation vs injected secrets.** ECS injects the secret once, at task
-   start. After a 7-day rotation, long-running tasks would still have the
-   old password, and new pool connections would fail. For short
-   experiments this doesn't come up. For anything longer, tasks need to be
-   restarted after rotation, or rotation lengthened.
-3. The password can contain URL-reserved characters, so it must be
-   percent-encoded when the URL is built.
+**Rotation vs injected secrets.** ECS resolves the secret once, when a task
+starts, and RDS rotates the password every 7 days. The one-off migration
+task runs for seconds, so it isn't affected. The long-running services are:
+see [Credential rotation](#credential-rotation-for-long-running-tasks).
 
 **Secret tags.** The secret is created by RDS, not Terraform, but it does
 carry the instance's tags (`Project=durable-runner-dev`,
@@ -296,6 +290,242 @@ databases in the account (there are none today). A bare `terraform
 destroy`, by contrast, removes *everything* in `infra/`: VPC, security
 groups, ECR, budget and database.
 
+## Migration task (Phase 2D, runtime verified)
+
+`infra/ecs.tf` defines the ECS cluster, one log group, the task execution
+role and a one-off migration task definition. It has no service and no
+load balancer; a migration runs only when started with `aws ecs run-task`.
+This is a personal development environment, not a production deployment.
+
+**Image.** Built from `git archive` of commit
+`4993cf9d54d2066a500a479a78095d5b32496fe5` (a clean tree), for
+`linux/arm64`, and pushed to ECR under that full SHA as its tag. ECR
+reports digest `sha256:acad2e45f65a0848287c940e2d0e1db07604aec245356300824595c5eb5731da`,
+the same as the local manifest digest.
+
+**What AWS reports (control plane, 2026-09-26).** Cluster
+`durable-runner-dev`; task definition `durable-runner-dev-migrate:1`
+(Fargate, ARM64, 256 CPU / 512 MiB, image `durable-runner:<SHA>`, execution
+role only, no task role, one secret `DB_PASSWORD`); execution role with two
+inline policies and no managed ones (ECR pull from this repository, log
+writes to `/ecs/durable-runner-dev`, `GetSecretValue` on the RDS master
+secret only); log group retention 7 days. `terraform plan
+-detailed-exitcode` with the same `image_tag` then exited 0 with "No
+changes": Terraform and AWS agree.
+
+**What ran (runtime, 2026-09-26).** Three migration tasks with the default
+command, in the backend security group, public subnets, public IP on. Each
+pulled the SHA image by the digest above, ran on ARM64 (platform 1.4.0),
+logged exactly `Migrations applied.` and exited 0. The first applied the 7
+migrations; the later runs found nothing to apply and still exited 0, so
+re-running migrations before a deployment is safe.
+
+A fourth, read-only diagnostic task (same task definition, only the
+container command overridden) connected through the application's own
+compiled `resolveDbConnectionConfig()` and `createDbPool()`, with
+`default_transaction_read_only=on`, ran five `SELECT`s and exited 0. It
+observed:
+
+- TLS verified by the client against the packaged CA bundle, with the
+  certificate naming the RDS endpoint (issuer `Amazon RDS us-east-1
+  Subordinate CA RSA2048 G1.A.10`); server-side `pg_stat_ssl` reports
+  TLSv1.3, `TLS_AES_256_GCM_SHA384`.
+- PostgreSQL 16.13, database `durable_runner`, user `durable_runner_admin`.
+- Tables `drizzle.__drizzle_migrations`, `public.steps`,
+  `public.step_events`, `public.workers`, `public.idempotent_effects`,
+  `public.spike_events`.
+- 7 rows in `drizzle.__drizzle_migrations`, each matching one of the 7
+  migration files packaged in the image by timestamp and SHA-256.
+
+Together these show: Fargate pulled the private SHA-tagged image; ECS
+injected `DB_PASSWORD` from the secret's `password` JSON key (no other
+password source exists in the task definition or image, and
+authentication succeeded); the task reached the private instance on 5432
+through the backend → rds security-group path; and TLS hostname and
+certificate verification passed against real RDS.
+
+**Secrets.** Nobody read the secret value; ECS resolved it inside the task.
+All four log streams were reviewed in full (11 lines): none contains a
+password, secret JSON or a `postgres://` URL.
+
+## Long-running services (Phase 3: Terraform-defined, not applied)
+
+`infra/services.tf` defines the ALB and three ECS services. They exist only
+when `enable_services = true`, which requires `enable_database = true` and
+an `image_tag`. The default is `false`, so a plain `terraform plan` doesn't
+include them. **None of this has been applied.** A plan with
+`enable_services = true` against the real state (2026-09-26) shows 9
+resources to add, 0 to change, 0 to destroy: 3 task definitions, 3
+services, the ALB, its HTTP listener and its target group. No existing
+resource changes. That includes the security groups, the execution role and
+the migration task definition.
+
+| Service | Command | Security group | Desired count variable | Behind the ALB |
+|---|---|---|---|---|
+| `api` | `node dist/server/src/index.js` | api | `api_desired_count` (default 1, 0–2) | yes, port 3000 |
+| `worker` | `node dist/server/src/worker/worker.js` | backend | `worker_desired_count` (default 1, 0–8) | no |
+| `coordinator` | `node dist/server/src/coordinator/coordinator.js` | backend | `coordinator_desired_count` (0 or 1) | no |
+
+All three run the migration task's image and settings: Fargate, ARM64,
+0.25 vCPU / 512 MiB, public subnets with a public IP (for ECR and
+CloudWatch Logs only), the same `DB_*` environment and the same
+`DB_PASSWORD` secret reference, and no task role. Each writes to
+`/ecs/durable-runner-dev` under its own stream prefix (`api/`, `worker/`,
+`coordinator/`). Each Fargate task gets its own kernel, CPU, memory and
+network interface. Once deployed, the three roles are separate processes
+in separate tasks that share only PostgreSQL; Fargate doesn't expose which
+physical hosts run them. Locally they are separate processes on one
+machine.
+
+No worker ID is set, so each worker task names itself
+`worker-<random UUID>`. A fixed `WORKER_ID` would give every task in the
+service the same name.
+
+**ALB.** Internet-facing, in both public subnets, alb security group, one
+HTTP listener on port 80 that forwards everything to the API target group.
+Without a domain or ACM certificate there's no HTTPS yet, so traffic
+between the client and the ALB is unencrypted. The API has only `GET`
+routes: health, the event list and SSE stream, and the static frontend.
+Tasks register by IP (`target_type = "ip"`, required for `awsvpc`). The
+SSE stream writes a keepalive at least every poll interval, so the 60 s
+idle timeout doesn't cut idle streams.
+
+**Health checks.** The target group checks `/api/health/live` every 15 s
+(2 passes to be healthy, 3 failures to be unhealthy), with a 60 s grace
+period after task start. It deliberately checks liveness, not readiness.
+For an ECS service behind a load balancer, a failing target isn't just
+taken out of rotation: ECS stops the task and starts another.
+`/api/health/ready` fails whenever PostgreSQL is unreachable. During a
+database outage, replacing API tasks would drop every SSE stream and fix
+nothing. `/api/health/ready` stays available for checking API → RDS by hand
+through the ALB.
+
+There are no container-level (ECS `healthCheck`) checks. For the API they
+would repeat the ALB check. The image has no `curl`, so each check would
+start a Node process. The worker and coordinator serve nothing that could
+be probed. Their failure modes, including a rotated password (below), end
+the process, and ECS replaces a stopped essential container anyway. A
+process that hangs without exiting would go unnoticed. That's accepted for
+now.
+
+**Draining and shutdown.** When ECS stops an API task, it first
+deregisters it from the target group. It sends SIGTERM only after the 30 s
+deregistration delay. Ordinary requests finish in milliseconds. Open SSE
+streams never end on their own, so 30 s (not the 300 s default) bounds how
+long they hold a draining task. After that the process closes its streams,
+waits for in-flight requests and closes its pool. Browsers reconnect
+through the ALB with `Last-Event-ID`, so no events are lost. `stopTimeout`
+(SIGTERM to SIGKILL) is 30 s for the API and the coordinator. For the
+worker it's 120 s, the Fargate maximum. The worker stops claiming on
+SIGTERM but finishes the step it holds, and the demo executor waits at most
+60 s. If a step outlasts that, SIGKILL ends it, the lease expires, and the
+coordinator makes the step claimable again. The step then runs again:
+at-least-once, as designed.
+
+**Deployments.** Rolling, starting the new task before stopping the old one
+(minimum healthy 100 %, maximum 200 %). For a moment two processes of the
+same role run side by side. That is safe for every role. Two workers
+compete through the same locked claim. Two coordinators duplicate a sweep
+without double-recording anything, because both sweeps use `FOR UPDATE
+SKIP LOCKED`. The deployment circuit breaker marks a deployment failed when
+its tasks keep failing to start or stay healthy, and rolls back to the last
+completed one. Outside deployments, a task that exits is simply replaced.
+
+**Tags.** `propagate_tags = "SERVICE"` copies `Project`/`ManagedBy`/`Name`
+onto every task. Fargate usage is then counted by the tag-filtered budget.
+
+**Database connections.** Each process opens at most `DB_POOL_MAX` (default
+4) connections. At the maximum counts (2 API, 8 workers, 1 coordinator)
+that's 44, and up to twice that for a moment during a rolling deployment of
+every service at once. RDS derives `max_connections` for PostgreSQL from
+instance memory (`DBInstanceClassMemory / 9531392`). For the 1 GiB
+`db.t4g.micro` that is on the order of 100. That hasn't been measured here.
+The pools open connections lazily, and an idle worker uses one or two.
+
+## Credential rotation for long-running tasks
+
+**The problem.** RDS rotates the master password every 7 days. ECS resolves
+`DB_PASSWORD` from the secret once, when a task starts. A service task can
+run for weeks, so it will outlive the password it started with. Changing a
+PostgreSQL role's password doesn't end sessions that are already
+authenticated. A running process therefore keeps working on the
+connections it has open. The next *new* connection it opens is refused
+with SQLSTATE `28P01` ("password authentication failed"). `pg.Pool` closes
+idle connections after 10 s and reconnects on demand, so a process that
+isn't continuously busy needs a new connection soon after a rotation.
+
+Without handling, each role's existing error handling makes this worse than
+a crash:
+
+- the coordinator logs a failed sweep and retries every second, forever;
+- the worker's heartbeat and lease renewal log and retry, forever (a failed
+  claim does end the process);
+- the API's readiness endpoint returns 503, forever, while liveness (the ALB
+  check) still passes.
+
+In all three cases ECS sees a running, healthy task and never replaces it.
+
+**What's implemented.** `createDbPool` (`server/src/db/pool-config.ts`)
+accepts an `onCredentialRejected` callback. It wraps the `pg.Client` class
+the pool builds connections with, so it sees every connection attempt,
+including those behind `pool.query()`. It reports only `28P01`. Network
+errors and a database that is starting up (`57P03`) stay transient and are
+retried as before. Each long-running entrypoint reacts by stopping cleanly
+and exiting with status 1:
+
+- **coordinator:** ends its loop after the current sweep, closes the pool,
+  exits 1;
+- **worker:** stops claiming, finishes the step it holds (on the
+  connections it still has), then closes the pool and exits 1, the same
+  path as SIGTERM. If finishing the step needs a new connection, that write
+  fails, the lease expires, and the step is recovered and runs again;
+- **API:** closes its SSE streams, waits for in-flight requests, closes the
+  pool, exits 1.
+
+The ECS service then starts a replacement task. Starting a task resolves
+the secret again, so the replacement gets the password that is current
+*now*. The secret's ARN doesn't change across rotations, so nothing in
+Terraform or the task definition changes. The one-off migration task needs
+none of this, because it runs for seconds.
+
+`server/tests/credential-rotation.test.ts` checks this against a TCP
+listener that answers every PostgreSQL startup with the `28P01` error a
+real server sends. The coordinator and worker exit 1. The API serves
+liveness, fails readiness, then shuts down cleanly and exits 1. A
+`57P03` failure is retried without exiting, and SIGTERM still exits 0. It
+has not yet been exercised against a real RDS rotation. Whether RDS ends
+existing sessions when it rotates is also unverified. Either way, the
+process exits at its first failed new connection.
+
+**The cost of this design.** Each rotation costs every task one restart.
+With one API task, the site is unavailable from the moment the API task
+exits until its replacement passes two health checks. That's typically a
+minute or two (an image pull plus Node startup), and it happens during
+whatever request first needed a new connection. That request fails. A step
+the worker is executing may have to run again. If a replacement starts
+while RDS is mid-rotation and gets a password that is already stale, it
+exits at its first connection and ECS tries again, backing off if that
+repeats. That window has not been observed.
+
+**Alternatives considered.**
+
+| Option | What it would take | Why not now |
+|---|---|---|
+| Exit on `28P01`, let ECS replace the task (chosen) | a few dozen lines in the pool module and the three entrypoints; no new AWS resource, permission or dependency | — |
+| App reads the secret itself at connect time (`pg` accepts an async `password` function) | the AWS SDK as a new dependency, a task role with `secretsmanager:GetSecretValue`, so containers would hold AWS credentials; secret caching and refresh logic | No restarts at rotation, but it adds a dependency and gives every container AWS credentials, for a problem a restart already solves |
+| IAM database authentication | a new database user and grants, a task role with `rds-db:connect`, the RDS signer package, 15-minute tokens | Same new dependency and task role, plus user management |
+| RDS Proxy | a proxy billed per vCPU of the instance, about $22/month minimum at this size, plus its own IAM role and secret access | More than the RDS instance itself costs, to avoid a restart a week |
+| Event-driven redeploy after each rotation (EventBridge rule → force a new deployment) | a rule, a target, and an IAM role allowed to update the services | New moving parts, and it still restarts every task. The chosen design restarts only tasks that actually hit the stale password |
+| Longer rotation interval | a change to the RDS-managed secret's rotation schedule | Only postpones the problem |
+
+The first alternative is the natural next step if a restart at rotation
+ever becomes unacceptable. For this project it isn't.
+
+**Operational note.** Forcing a new deployment of a service (`aws ecs
+update-service --force-new-deployment`) also makes every task pick up the
+current password. That's useful right after a rotation, before the tasks
+notice on their own.
+
 ## ECR
 
 One private repository, `durable-runner`, for the single image.
@@ -325,10 +555,14 @@ free-tier credits.
 | AWS Budget (no actions) | free |
 | ECR storage | $0.10/GB-month; at roughly 0.1–0.15 GB compressed per image, cents per month for dozens of images. Pulls by Fargate in the same region are free. |
 | RDS (while `enable_database = true`) | db.t4g.micro $0.016/h + 20 GB gp3 $0.115/GB-month + managed secret $0.40/month ≈ $14.40/month (≈ $0.47/day). Backups within the 20 GB allowance and the private-only network add nothing. Setting `enable_database = false` stops it. |
-| Public IPv4 | none yet: nothing in this foundation gets a public address |
+| ECS cluster, task definitions, execution role | no charge |
+| CloudWatch Logs (`/ecs/durable-runner-dev`, 7-day retention) | $0.50/GB ingested; the migration runs wrote a few KB |
+| Fargate (migration tasks) | per second while a task runs, 1-minute minimum; seconds per run |
+| Public IPv4 | $0.005/h per address, only while a task runs; nothing else here has one |
 
-**Later, when compute and database exist (not being provisioned now).**
-Rough 24/7 monthly figures:
+**Long-running services (while `enable_services = true`; defined, not
+applied).** Rough 24/7 monthly figures at the default desired counts (one
+task per role):
 
 | Item | Assumption | ≈ per month |
 |---|---|---|
@@ -340,9 +574,12 @@ Rough 24/7 monthly figures:
 | CloudWatch Logs | low volume | a few $ |
 | **Total** | | **≈ $70–85** |
 
-That is above the $50 budget. Running everything around the clock isn't the
-plan: the intent is to scale services to zero or tear the stack down when
-it isn't being used, and the budget alerts are there to catch forgetting.
+That is above the $50 budget, roughly $2.50 per day. Running everything
+around the clock isn't the plan. Scaling the services to zero stops the
+Fargate and task-IPv4 charges but keeps the ALB's (≈ $0.80/day).
+`enable_services = false` removes the ALB too. The budget alerts are there
+to catch forgetting. Each additional worker task adds about $0.36/day
+(Fargate plus its public IPv4 address).
 
 ## Cost guardrail
 
@@ -409,4 +646,14 @@ cp terraform.tfvars.example terraform.tfvars   # enable_budget, budget_alert_ema
 terraform init
 terraform validate
 terraform plan
+```
+
+The services need an image pushed under a full commit SHA, and that commit
+must contain the credential-rotation handling above:
+
+```bash
+terraform plan -var image_tag=<40-char SHA> -var enable_services=true \
+  -out=services.tfplan
+# scale one role without touching the others, e.g.:
+#   -var worker_desired_count=2
 ```
