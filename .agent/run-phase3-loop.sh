@@ -69,18 +69,18 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
       "Bash(git push:*)" \
       "Bash(git reset:*)" \
       "Bash(git clean:*)" \
-      "Bash(aws ecr put-*:*)" \
-      "Bash(aws ecr batch-delete-*:*)" \
-      "Bash(aws ecs create-*:*)" \
-      "Bash(aws ecs update-*:*)" \
-      "Bash(aws ecs delete-*:*)" \
+      "Bash(aws ecr put-*)" \
+      "Bash(aws ecr batch-delete-*)" \
+      "Bash(aws ecs create-*)" \
+      "Bash(aws ecs update-*)" \
+      "Bash(aws ecs delete-*)" \
       "Bash(aws ecs run-task:*)" \
-      "Bash(aws ec2 authorize-*:*)" \
-      "Bash(aws ec2 revoke-*:*)" \
-      "Bash(aws iam create-*:*)" \
-      "Bash(aws iam put-*:*)" \
-      "Bash(aws iam attach-*:*)" \
-      "Bash(aws iam delete-*:*)" \
+      "Bash(aws ec2 authorize-*)" \
+      "Bash(aws ec2 revoke-*)" \
+      "Bash(aws iam create-*)" \
+      "Bash(aws iam put-*)" \
+      "Bash(aws iam attach-*)" \
+      "Bash(aws iam delete-*)" \
       "Bash(aws secretsmanager get-secret-value:*)" \
     --output-format text \
     2>&1 | tee "$logfile"
