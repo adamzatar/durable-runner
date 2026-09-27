@@ -35,6 +35,9 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
   echo "=== ITERATION $i / $MAX_ITERATIONS ==="
   echo "Log: $logfile"
 
+  # Reaching --max-turns is expected: preserve the work and let the next
+  # fresh-context iteration continue from PLAN/STATE and the working tree.
+  set +e
   claude -p "$(cat .agent/PHASE3_PROMPT.md)" \
     --model opus \
     --max-turns "$MAX_TURNS" \
@@ -84,6 +87,45 @@ for ((i=1; i<=MAX_ITERATIONS; i++)); do
       "Bash(aws secretsmanager get-secret-value:*)" \
     --output-format text \
     2>&1 | tee "$logfile"
+
+  pipeline_status=("${PIPESTATUS[@]}")
+  claude_status="${pipeline_status[0]}"
+  tee_status="${pipeline_status[1]}"
+  set -e
+
+  if [[ "$tee_status" -ne 0 ]]; then
+    echo "Log capture failed with status $tee_status; stopping."
+    exit "$tee_status"
+  fi
+
+  # The agent may have reached a legitimate stop condition on its final turn.
+  if [[ -f .agent/HUMAN_GATE.md ]]; then
+    echo
+    echo "=== HUMAN APPROVAL GATE REACHED ==="
+    cat .agent/HUMAN_GATE.md
+    exit 0
+  fi
+
+  if [[ -f .agent/BLOCKED.md ]]; then
+    echo
+    echo "=== AGENT BLOCKED ==="
+    cat .agent/BLOCKED.md
+    exit 0
+  fi
+
+  if [[ "$claude_status" -ne 0 ]]; then
+    if grep -Fq "Reached max turns" "$logfile"; then
+      echo
+      echo "Claude reached the $MAX_TURNS-turn limit."
+      echo "Preserving its work and continuing with a fresh context."
+      continue
+    fi
+
+    echo
+    echo "Claude exited unexpectedly with status $claude_status."
+    echo "Stopping rather than blindly retrying."
+    exit "$claude_status"
+  fi
 
 done
 
