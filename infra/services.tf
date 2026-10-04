@@ -293,6 +293,12 @@ resource "aws_ecs_task_definition" "coordinator" {
 # image, write logs and read the secret, and on teardown the services must
 # stop their tasks before those permissions are removed.
 
+# Deployment ownership boundary: Terraform owns each service's networking,
+# scaling and deployment policy, while CI/CD owns which task-definition
+# revision the service runs. Ignoring task_definition prevents a later
+# infrastructure plan from rolling a successful CI deployment back to the
+# bootstrap revision recorded in Terraform state.
+
 resource "aws_ecs_service" "api" {
   count = var.enable_services ? 1 : 0
 
@@ -302,6 +308,10 @@ resource "aws_ecs_service" "api" {
   desired_count   = var.api_desired_count
   launch_type     = "FARGATE"
   propagate_tags  = "SERVICE"
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 
   network_configuration {
     subnets          = local.task_subnet_ids
@@ -348,6 +358,10 @@ resource "aws_ecs_service" "worker" {
   launch_type     = "FARGATE"
   propagate_tags  = "SERVICE"
 
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+
   network_configuration {
     subnets          = local.task_subnet_ids
     security_groups  = [aws_security_group.backend.id]
@@ -379,6 +393,10 @@ resource "aws_ecs_service" "coordinator" {
   desired_count   = var.coordinator_desired_count
   launch_type     = "FARGATE"
   propagate_tags  = "SERVICE"
+
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 
   network_configuration {
     subnets          = local.task_subnet_ids
