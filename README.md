@@ -4,6 +4,10 @@ Durable Runner is a PostgreSQL-backed task runtime built around one
 question: what happens to a job if the worker running it disappears halfway
 through?
 
+The AWS development deployment was verified and later torn down to avoid
+ongoing costs. The demo runs locally. See the [local setup](#running-it-locally)
+and [interview guide](docs/interview-guide.md).
+
 Retrying it is easy. The harder case is when the worker didn't actually die.
 It froze, its lease expired, another worker took over, and then the old
 worker woke back up and tried to finish the same job. From its point of view
@@ -18,12 +22,11 @@ losing ownership. I ended up with three separate mechanisms:
 - **Leases.** Claiming a task gives a worker a time-limited lease, which it
   renews while it works. If the lease runs out, the task can be claimed again.
 - **Generation fencing.** Every claim increments the task's `lease_version`.
-  Every write a worker makes to the task has to carry the generation it
-  claimed with, so a worker that comes back holding an old generation can't
-  touch the new owner's state.
-- **Idempotency.** Fencing fixes the workflow state, but not the side effect.
-  If the old worker already sent something before it froze, the rerun uses a
-  stable key to reuse that result instead of doing it again.
+  Renewal, completion and failure reports must carry the claimed generation.
+  PostgreSQL rejects an old generation's writes to the task.
+- **Idempotency.** Attempts reuse a stable key in the controlled PostgreSQL
+  effect sink. If an earlier attempt committed a receipt before it froze,
+  the next attempt gets that stored result.
 
 Workers are independent Node.js processes. PostgreSQL is the only thing they
 share, and all claiming, recovery and coordination happens through rows in
@@ -96,9 +99,8 @@ Every status change is checked against one transition table in
 
 The recovery, fencing and idempotency demos and reported benchmarks were
 validated with independent OS processes on one machine sharing PostgreSQL.
-Separate API, worker and coordinator services have also been deployed on
-ECS Fargate and smoke-tested (see [AWS deployment and CI/CD](#aws-deployment-and-cicd)).
-Controlled Fargate crash recovery remains unverified.
+The separate AWS deployment was verified with runtime image checks and API
+smoke tests. See [AWS deployment and CI/CD](#aws-deployment-and-cicd).
 
 ## Heartbeats, leases, generations, attempts
 
@@ -389,21 +391,28 @@ positive integer, default 4).
 ## AWS deployment and CI/CD
 
 Separate API, worker and coordinator ECS Fargate services were deployed,
-with the API behind an ALB and PostgreSQL on private RDS subnets.
-[GitHub Actions run 37248771108](https://github.com/adamzatar/durable-runner/actions/runs/37248771108)
-completed on October 4, 2026 EDT / October 5 UTC: typecheck, database
-migrations, tests and production build, followed by GitHub OIDC authentication,
-publication of an immutable Git-SHA-tagged ARM64 image to ECR, ECS migration
-and service rollout, matching running-image digests, and API smoke checks.
+with the API behind an ALB, private RDS PostgreSQL, an ECR image repository
+and CloudWatch logs. Terraform defined the stack. The September 26–27, 2026
+verification checked running tasks, API readiness and SSE through the ALB.
+See the [Phase 3 verification record](docs/phase3-cloud-verification.md).
 
-Authenticated AWS CLI output supplied to the engineering controller on
-November 8, 2026 confirmed all three services at 1/1 running with the verified
-image digest, private RDS available, the ALB active, and API readiness
-returning `{"status":"ok","db":"ok"}`. This is a dated observation, not a
-guarantee of ongoing availability. The reported 3,277 tasks/s remains an
-Apple M2 measurement; AWS throughput, controlled Fargate crash recovery and
-production readiness are unverified. [The evidence ledger](docs/resume-evidence.md)
-records the exact environment, image digest and Phase 5 checkpoint.
+On October 4, 2026 EDT (October 5 UTC), CI verified the application and
+authenticated to AWS through GitHub OIDC. It published an immutable,
+Git-SHA-tagged ARM64 image, ran migrations in a one-off ECS task, rolled
+the three services, compared the running image digests with ECR and ran
+API smoke checks. See [GitHub Actions run 37248771108](https://github.com/adamzatar/durable-runner/actions/runs/37248771108).
+
+A November 8, 2026 check confirmed the service counts, image digest and API
+readiness. The application stack was subsequently torn down to avoid ongoing
+costs. There is no hosted demo. The project concluded with the local failure
+demos and ordinary AWS deployment verification. Phase 5 (controlled Fargate
+crash recovery) and Phase 6 (cloud benchmarking) were omitted. See the
+[evidence ledger](docs/resume-evidence.md).
+
+Verification still runs on pushes to `main` and manual workflow runs.
+The AWS job requires a successful verification, `main` and the
+`DURABLE_RUNNER_DEPLOY_ENABLED` repository variable set to `true`.
+See [how to re-enable deployment after reprovisioning](docs/cloud-architecture.md#re-enable-aws-deployment).
 
 ## Where to look
 
@@ -416,3 +425,5 @@ records the exact environment, image digest and Phase 5 checkpoint.
 - [`docs/architecture.md`](docs/architecture.md): every mechanism in detail
 - [`docs/decisions/`](docs/decisions/): ADRs for the three hardest calls
 - [`docs/build-journal.md`](docs/build-journal.md): the experiments behind them
+- [`docs/interview-guide.md`](docs/interview-guide.md): failure traces, SQL
+  and interview questions

@@ -33,16 +33,19 @@ matched the deployment digest above. RDS was `available`, private and
 `db.t4g.micro`; the ALB was active, and API readiness returned
 `{"status":"ok","db":"ok"}`. The experiment-only task definition
 `durable-runner-dev-worker-phase5:1` was active, ARM64 Linux, with the expected
-image and `stopTimeout=2`. This is a dated observation, not a permanent
-guarantee of resource availability. No new AWS queries were made for this
-documentation update.
+image and `stopTimeout=2`. These observations describe the deployment on
+that date.
+
+The AWS application stack was subsequently torn down to avoid ongoing
+costs. The portfolio demo runs locally. Historical deployment evidence
+below is retained with its verification dates.
 
 ## Claims
 
 | Claim | Evidence | Verified? | Resume-safe wording |
 |---|---|---|---|
 | Built a PostgreSQL-backed durable task runtime with leases, fencing, retries, dead-lettering and idempotent effects | Source in `server/src`; 244 tests across 22 files passed at the exact commit and date recorded in [CI/CD verification](#cicd-verification) | **Yes** | "Built a TypeScript/PostgreSQL durable task runtime with lease-based ownership, fencing tokens, bounded retries and dead-lettering" |
-| Throughput and correctness under load | `benchmarks/results/2026-09-19T01-14-28-972Z_3cbb858.md`: 3,277 tasks/s median at 8 local workers; 0 duplicate grants / 200,266 claims; 0 accepted stale writes / 4,750 attempts; 0 duplicate effects / 45,000 executions | **Yes**, local machine (Apple M2, Node 20.19.4, PostgreSQL 16.15) | "Benchmarked at ~3.3k tasks/s across 8 worker processes on one machine, with zero duplicate ownership grants across 200k claims" |
+| Throughput and correctness under load | [Approved local benchmark](../benchmarks/results/2026-09-19T01-14-28-972Z_3cbb858.md): 3,277.1 tasks/s median with 8 workers, zero duplicate ownership grants across 200,266 claims, 4,750 rejected stale writes and zero duplicate logical effects across 45,000 executions | **Yes**, local machine (Apple M2, Node 20.19.4, PostgreSQL 16.15) | "Benchmarked at ~3.3k tasks/s across 8 worker processes on one machine, with zero duplicate ownership grants across 200k claims" |
 | Runs on Node.js 24 | Node 24.21.0: `npm ci`, typecheck, build, full test suite, compiled API/worker/coordinator smoke tests | **Yes** | Not a résumé bullet on its own |
 | Containerized with Docker | `Dockerfile` (multi-stage, non-root, one image for all roles), committed. The 2026-09-26 migration image was built for linux/arm64 from `git archive` of commit `4993cf9`. API, worker and coordinator Fargate tasks were subsequently verified in [Phase 3](phase3-cloud-verification.md) and at `5f74e0e…` by [CI/CD][ci] | **Yes** | "Packaged the runtime as a single multi-stage, non-root Docker image serving API, worker, coordinator and migration roles" |
 | Authored Terraform for AWS networking, security groups, ECR and budget alerts | `infra/*.tf`; `terraform fmt -check`, `terraform init`, `terraform validate` pass; real `terraform plan` against the personal AWS account (us-east-1), audited resource by resource | **Yes** | Covered by the provisioning row below |
@@ -60,7 +63,7 @@ documentation update.
 | Cloud throughput benchmarks | Reported throughput and concurrency results were measured locally on an Apple M2, not AWS | **No** | Use the explicitly local benchmark wording above |
 | Production readiness | Development/evidence deployment; CI/CD and smoke checks do not establish production readiness | **No** | none |
 
-## Phase 5 checkpoint
+## Final experiment scope
 
 Real-process local crash recovery has been demonstrated: the
 [build journal](build-journal.md#2026-09-17--milestone-5-final-recovery-cleanup)
@@ -70,10 +73,10 @@ GitHub Actions CI/CD have also been verified.
 
 The supplied 2026-11-08 AWS output verified the experiment-only task
 definition `durable-runner-dev-worker-phase5:1` with ARM64 Linux, the expected
-image and a two-second stop timeout. The controlled Fargate crash-recovery
-experiment has **not yet been executed successfully**; cloud crash recovery
-remains unverified. Task-definition registration and ordinary deployment
-smoke checks do not establish that result.
+image and a two-second stop timeout. The evidence stops at task-definition
+registration. Phase 5 (controlled Fargate crash recovery) and Phase 6
+(cloud benchmarking) were omitted. Further AWS experiments are outside
+the completed portfolio scope.
 
 Things never to claim for this project: exactly-once execution,
 production-grade or globally distributed validation. Fencing protects
