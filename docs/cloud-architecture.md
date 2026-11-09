@@ -1,14 +1,18 @@
 # Cloud architecture (AWS)
 
-How Durable Runner runs on AWS, with dated implementation and deployment
-evidence.
+How Durable Runner was deployed on AWS, with dated verification evidence
+and the configuration for a future redeployment.
 The distributed-execution design itself (claiming, leases, fencing, retries,
 events) is in [architecture.md](architecture.md) and doesn't change here.
 
 ## Status
 
-Deployment observations below are dated evidence, not a guarantee of ongoing
-availability. [Phase 3 verification](phase3-cloud-verification.md) records the
+The AWS application stack was deliberately torn down after verification
+to avoid ongoing costs. There is no hosted demo. Phase 5 (controlled Fargate
+crash recovery) and Phase 6 (cloud benchmarking) were omitted when the project
+closed out the AWS work.
+
+[Phase 3 verification](phase3-cloud-verification.md) records the
 2026-09-26/27 service deployment. Phase 4's
 [successful CI/CD run](https://github.com/adamzatar/durable-runner/actions/runs/37248771108)
 on 2026-10-04 EDT / 2026-10-05 UTC deployed commit
@@ -17,8 +21,7 @@ and API smoke checks. The [evidence ledger](resume-evidence.md) records the
 exact digest and authenticated AWS CLI output supplied to the engineering
 controller on 2026-11-08: all three services at 1/1 running on revision `:2`
 with that digest, private RDS available, an active ALB and successful API
-readiness. Cloud throughput, controlled Fargate crash recovery and production
-readiness remain unverified.
+readiness at that checkpoint.
 
 | Layer | Planned | Implementation (Terraform unless noted) | Dated deployment evidence |
 |---|---|---|---|
@@ -188,7 +191,7 @@ to. It sits in subnets with no internet route, accepts only 5432 from the
 api and backend groups, and gets no public address. There's no rule for a
 laptop; reaching it for debugging will go through a task inside the VPC.
 
-## RDS PostgreSQL (deployed; reached from Fargate over verified TLS)
+## RDS PostgreSQL (Fargate connectivity verified over TLS)
 
 `infra/rds.tf` defines one instance and its DB subnet group. On 2026-09-25
 the reviewed saved plan was applied: 2 added (`aws_db_subnet_group.main`,
@@ -300,7 +303,7 @@ experiments. `terraform destroy -target=...` is an emergency or debugging
 tool, not part of the routine lifecycle.
 
 Terraform only owns what's in its state, so neither path can touch other
-databases in the account (there are none today). A bare `terraform
+databases in the account. A bare `terraform
 destroy`, by contrast, removes *everything* in `infra/`: VPC, security
 groups, ECR, budget and database.
 
@@ -588,7 +591,7 @@ task per role):
 | ALB public IPv4 | 2 addresses (one per AZ) | $7 |
 | Fargate | 3 tasks × 0.25 vCPU / 0.5 GB, ARM64 | $22 (x86 ≈ $27) |
 | Task public IPv4 | 3 addresses | $11 |
-| RDS PostgreSQL | already deployed; counted in the table above | ($14.40) |
+| RDS PostgreSQL | included in the foundation estimate above | ($14.40) |
 | CloudWatch Logs | low volume | a few $ |
 | **Total** | | **≈ $70–85** |
 
@@ -675,3 +678,25 @@ terraform plan -var image_tag=<40-char SHA> -var enable_services=true \
 # scale one role without touching the others, e.g.:
 #   -var worker_desired_count=2
 ```
+
+### Re-enable AWS deployment
+
+The [workflow](../.github/workflows/deploy.yml) continues to verify pushes to
+`main` and manual runs. It skips the AWS job when
+`DURABLE_RUNNER_DEPLOY_ENABLED` is unset or does not equal `true`. The
+job also requires a successful `verify` job and a run on `main`.
+
+1. Reprovision the Terraform stack in the account and region configured
+   in the workflow. Restore the GitHub OIDC provider and deploy role trust.
+   Publish an ARM64 bootstrap image with a full Git SHA tag in ECR before
+   creating the migration task definition and ECS services that use it.
+2. Restore the private RDS instance, one-off migration task definition,
+   three ECS services and ALB. Apply the bootstrap schema and check API
+   readiness. The deployment script registers new revisions from the
+   existing definitions and updates existing services.
+3. In **Settings → Secrets and variables → Actions → Variables**, set the
+   repository variable `DURABLE_RUNNER_DEPLOY_ENABLED` to `true`. Run
+   **Deploy to AWS** on `main` from the Actions tab or push to `main`.
+   Confirm the migration, rollout, running-image checks and smoke tests
+   in the run. Remove the variable or set it to `false` to disable future
+   deployments.
