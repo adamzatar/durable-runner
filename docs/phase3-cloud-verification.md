@@ -3,6 +3,15 @@
 Verified: 2026-09-26/27
 Region: us-east-1
 
+**Superseding evidence:** Phase 4's
+[successful CI/CD run 37248771108](https://github.com/adamzatar/durable-runner/actions/runs/37248771108)
+completed on 2026-10-04 EDT / 2026-10-05 UTC for commit
+`5f74e0e55acb9465d50ecd6f4c763a175372e0c4`, verifying automated deployment,
+running-image digests and API smoke checks. The September evidence below is
+preserved as recorded. The [evidence ledger](resume-evidence.md) also records
+the supplied 2026-11-08 AWS observation; neither checkpoint guarantees ongoing
+availability or establishes production readiness.
+
 ## Source and image
 
 Git commit:
@@ -55,4 +64,6 @@ long-running API task successfully connected to the private RDS database.
 - The ALB currently exposes HTTP rather than HTTPS.
 - This is a development/evidence deployment, not a production claim.
 - Cloud-scale throughput has not yet been benchmarked.
-- CI/CD and application observability beyond logs are still pending.
+- At this September checkpoint, CI/CD and application observability beyond
+  logs were pending. CI/CD was subsequently completed by the Phase 4 run
+  linked above; observability beyond logs remains unverified.

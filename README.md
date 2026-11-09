@@ -94,9 +94,11 @@ on them, so many workers can claim at once without getting the same row.
 Every status change is checked against one transition table in
 [`step-transitions.ts`](server/src/domain/step-transitions.ts).
 
-Everything so far has been validated with independent OS processes on one
-machine sharing one PostgreSQL instance. I haven't tested workers on
-separate machines.
+The recovery, fencing and idempotency demos and reported benchmarks were
+validated with independent OS processes on one machine sharing PostgreSQL.
+Separate API, worker and coordinator services have also been deployed on
+ECS Fargate and smoke-tested (see [AWS deployment and CI/CD](#aws-deployment-and-cicd)).
+Controlled Fargate crash recovery remains unverified.
 
 ## Heartbeats, leases, generations, attempts
 
@@ -258,7 +260,12 @@ takes about a millisecond.
 
 ## Tests and demos
 
-The suite has **203 tests across 18 files**, all against a real PostgreSQL.
+At commit `5f74e0e55acb9465d50ecd6f4c763a175372e0c4`,
+[GitHub Actions](https://github.com/adamzatar/durable-runner/actions/runs/37248771108)
+reported **244 passing tests across 22 files** on October 4, 2026 EDT
+(October 5 UTC), using Node 24.21.0 and PostgreSQL 16.15.
+The suite includes real PostgreSQL integration tests, configuration tests,
+connection/TLS failure simulations and process-lifecycle tests.
 They cover concurrent claiming, completion authorization, lease renewal,
 expiry and recovery, fencing (including a reused worker ID), races between
 owners and the recovery sweep, retries and dead-lettering, idempotent
@@ -267,8 +274,9 @@ API/SSE, and worker heartbeats and loop behavior. Several of them were
 checked against deliberately broken code, for example dropping `SKIP LOCKED`
 or the version guard, to confirm they fail.
 
-The tests run concurrent actors as separate connections inside one process.
-The demos use real child processes and check their results from PostgreSQL:
+The database concurrency tests run actors as separate connections inside
+one process. Process-lifecycle tests and demos launch real child processes;
+the demos check their results from PostgreSQL:
 
 | Command | What it shows |
 |---|---|
@@ -300,8 +308,9 @@ It does not provide:
   transactions by design.
 - **Guaranteed eventual success.** Tasks can dead-letter, including from
   crashes alone.
-- **Validated multi-machine or production-scale behavior.** Everything here
-  ran on one machine.
+- **Verified cloud crash recovery or production-scale performance.** Recovery
+  demos and throughput measurements are local; AWS verification covers
+  deployment, image provenance and application smoke checks.
 
 It also assumes the database clock doesn't jump backward across an expired
 deadline, and it won't take a lease away from a worker that keeps renewing
@@ -377,13 +386,33 @@ connections, ends open SSE streams, closes Fastify and its pool, and exits
 0. Each process sizes its PostgreSQL pool from `DB_POOL_MAX` (optional,
 positive integer, default 4).
 
+## AWS deployment and CI/CD
+
+Separate API, worker and coordinator ECS Fargate services were deployed,
+with the API behind an ALB and PostgreSQL on private RDS subnets.
+[GitHub Actions run 37248771108](https://github.com/adamzatar/durable-runner/actions/runs/37248771108)
+completed on October 4, 2026 EDT / October 5 UTC: typecheck, database
+migrations, tests and production build, followed by GitHub OIDC authentication,
+publication of an immutable Git-SHA-tagged ARM64 image to ECR, ECS migration
+and service rollout, matching running-image digests, and API smoke checks.
+
+Authenticated AWS CLI output supplied to the engineering controller on
+November 8, 2026 confirmed all three services at 1/1 running with the verified
+image digest, private RDS available, the ALB active, and API readiness
+returning `{"status":"ok","db":"ok"}`. This is a dated observation, not a
+guarantee of ongoing availability. The reported 3,277 tasks/s remains an
+Apple M2 measurement; AWS throughput, controlled Fargate crash recovery and
+production readiness are unverified. [The evidence ledger](docs/resume-evidence.md)
+records the exact environment, image digest and Phase 5 checkpoint.
+
 ## Where to look
 
 - [`server/src/db/`](server/src/db/): the SQL that matters (claim, renew,
   complete, fail, recover, effects, events)
 - [`server/src/worker/`](server/src/worker/): the worker loop, the
   executor, and the demos
-- [`server/tests/`](server/tests/): integration tests against real PostgreSQL
+- [`server/tests/`](server/tests/): PostgreSQL integration, configuration,
+  connection/TLS and process-lifecycle tests
 - [`docs/architecture.md`](docs/architecture.md): every mechanism in detail
 - [`docs/decisions/`](docs/decisions/): ADRs for the three hardest calls
 - [`docs/build-journal.md`](docs/build-journal.md): the experiments behind them

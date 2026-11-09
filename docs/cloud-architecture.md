@@ -1,22 +1,37 @@
 # Cloud architecture (AWS)
 
-How Durable Runner is meant to run on AWS, and how much of that exists.
+How Durable Runner runs on AWS, with dated implementation and deployment
+evidence.
 The distributed-execution design itself (claiming, leases, fencing, retries,
 events) is in [architecture.md](architecture.md) and doesn't change here.
 
 ## Status
 
-| Layer | Planned | Defined in Terraform (`infra/`) | Deployed |
+Deployment observations below are dated evidence, not a guarantee of ongoing
+availability. [Phase 3 verification](phase3-cloud-verification.md) records the
+2026-09-26/27 service deployment. Phase 4's
+[successful CI/CD run](https://github.com/adamzatar/durable-runner/actions/runs/37248771108)
+on 2026-10-04 EDT / 2026-10-05 UTC deployed commit
+`5f74e0e55acb9465d50ecd6f4c763a175372e0c4` and verified running-image digests
+and API smoke checks. The [evidence ledger](resume-evidence.md) records the
+exact digest and authenticated AWS CLI output supplied to the engineering
+controller on 2026-11-08: all three services at 1/1 running on revision `:2`
+with that digest, private RDS available, an active ALB and successful API
+readiness. Cloud throughput, controlled Fargate crash recovery and production
+readiness remain unverified.
+
+| Layer | Planned | Implementation (Terraform unless noted) | Dated deployment evidence |
 |---|---|---|---|
 | VPC, 4 subnets, IGW, route tables | yes | yes | **yes**, verified 2026-09-24 |
 | Security groups (alb, api, backend, rds) | yes | yes | **yes**, verified 2026-09-24 |
-| ECR repository `durable-runner` | yes | yes | **yes**; one Git-SHA-tagged image pushed 2026-09-26 |
+| ECR repository `durable-runner` | yes | yes (`infra/`) | **yes**; first Git-SHA-tagged image pushed 2026-09-26; Phase 4 image published and verified in all three services |
 | Budget alerts (filtered to `Project` tag) | yes | yes (`enable_budget = true` in local tfvars) | **yes**, verified 2026-09-25 |
 | ECS cluster, execution role, log group, migration task definition | yes | yes (`ecs.tf`) | **yes**, control plane verified 2026-09-26; migration task **runtime verified** 2026-09-26 |
-| ALB, Fargate API / worker / coordinator services | yes | yes (`services.tf`, behind `enable_services`; not applied) | **no** |
+| ALB, Fargate API / worker / coordinator services | yes | yes (`services.tf`, behind `enable_services`) | **yes**, verified 2026-09-26/27; Phase 4 rollout verified; supplied 2026-11-08 observation confirmed active ALB and services |
 | RDS DB subnet group (private DB subnets) | yes | yes (`rds.tf`, always present) | **yes**, verified 2026-09-25 |
 | RDS PostgreSQL 16 instance (`db.t4g.micro`, private) | yes | yes (`rds.tf`, behind `enable_database`) | **yes**, control plane verified 2026-09-25; TLS SQL connectivity from Fargate **runtime verified** 2026-09-26 |
-| TLS (ACM), DNS (Route 53), CI/CD | later | no | no |
+| CI/CD | yes | yes (`.github/workflows/deploy.yml`, `.github/scripts/deploy-ecs.sh`) | **yes**, Phase 4 run linked above: OIDC, ECR publication, migrations, rollout, digest verification and smoke checks |
+| HTTPS (ACM), DNS (Route 53) | later | no | no |
 
 On 2026-09-24 the reviewed plan was applied: 29 added, 0 changed, 0
 destroyed. The result was then checked directly with the AWS CLI rather than
@@ -26,13 +41,12 @@ ECR settings and tags. An immediate re-plan reported no changes. The two AZs
 are `us-east-1a` (`use1-az2`) and `us-east-1b` (`use1-az4`). `terraform
 output` (run in `infra/`) prints the resource IDs.
 
-Since 2026-09-25 the RDS instance runs here (see below). It has one
-network interface, with private address `10.0.11.44` and no public IP.
-Since 2026-09-26 one-off Fargate migration tasks have run in the backend
-security group and reached it (see
-[Migration task](#migration-task-phase-2d-runtime-verified)). No ALB and no
-long-running service exist yet, so the alb and api security groups still
-only define *who would be allowed*.
+The RDS provisioning check on 2026-09-25 observed one network interface,
+with private address `10.0.11.44` and no public IP. On 2026-09-26 one-off
+Fargate migration tasks reached it through the backend security group (see
+[Migration task](#migration-task-phase-2d-runtime-verified)). The subsequent
+Phase 3 deployment verified the ALB and independently running API, worker
+and coordinator services using the intended security-group paths.
 
 AWS also created the VPC's *main* route table automatically. Terraform
 doesn't manage it, and no subnet uses it; it contains only the local
@@ -44,7 +58,7 @@ destroyed). `aws budgets` shows the filter, limit and three notifications
 as configured, and a re-plan reported no changes. With that, the Phase 2A
 foundation (network, security groups, ECR and cost guardrail) is complete.
 
-## Target shape
+## Deployment shape
 
 ```mermaid
 flowchart TB
@@ -75,7 +89,7 @@ whether a task is the API, a worker, the coordinator or a one-off migration.
 
 Region `us-east-1`. VPC `10.0.0.0/16`, DNS support and DNS hostnames on.
 
-| Subnet | CIDR | AZ | Route table | Will hold |
+| Subnet | CIDR | AZ | Route table | Role |
 |---|---|---|---|---|
 | public-a | 10.0.0.0/24 | 1st standard AZ | public | ALB node, Fargate task ENIs |
 | public-b | 10.0.1.0/24 | 2nd standard AZ | public | ALB node, Fargate task ENIs |
@@ -140,7 +154,7 @@ reach PostgreSQL, and only the ALB can reach port 3000. By contrast,
 and a CIDR can't follow tasks whose IPs change on every deployment.
 
 **Public IP ≠ publicly reachable.** Fargate tasks in the public subnets
-will get public IPv4 addresses so they can reach ECR and CloudWatch Logs.
+get public IPv4 addresses so they can reach ECR and CloudWatch Logs.
 Inbound, a packet from the internet to a task on port 3000 is routed there,
 but the api group only accepts 3000 from the alb group, so it's dropped.
 Backend tasks accept nothing inbound at all.
@@ -182,7 +196,7 @@ the reviewed saved plan was applied: 2 added (`aws_db_subnet_group.main`,
 7 minutes to become available. It was then checked with the AWS CLI, and
 an immediate re-plan reported no changes.
 
-What AWS reports:
+What AWS reported at the 2026-09-25 provisioning check:
 
 - `durable-runner-dev`: PostgreSQL **16.13** (RDS's default 16.x;
   `engine_version = "16"` doesn't drift against it), `db.t4g.micro`,
@@ -293,8 +307,10 @@ groups, ECR, budget and database.
 ## Migration task (Phase 2D, runtime verified)
 
 `infra/ecs.tf` defines the ECS cluster, one log group, the task execution
-role and a one-off migration task definition. It has no service and no
-load balancer; a migration runs only when started with `aws ecs run-task`.
+role and a one-off migration task definition. The migration task itself is
+not an ECS service or ALB target; it runs when started with `aws ecs run-task`,
+including by CI/CD. The separate long-running services are defined in
+`infra/services.tf` and were deployed in Phase 3.
 This is a personal development environment, not a production deployment.
 
 **Image.** Built from `git archive` of commit
@@ -348,17 +364,18 @@ certificate verification passed against real RDS.
 All four log streams were reviewed in full (11 lines): none contains a
 password, secret JSON or a `postgres://` URL.
 
-## Long-running services (Phase 3: Terraform-defined, not applied)
+## Long-running services (Phase 3: deployed and verified)
 
 `infra/services.tf` defines the ALB and three ECS services. They exist only
 when `enable_services = true`, which requires `enable_database = true` and
 an `image_tag`. The default is `false`, so a plain `terraform plan` doesn't
-include them. **None of this has been applied.** A plan with
-`enable_services = true` against the real state (2026-09-26) shows 9
-resources to add, 0 to change, 0 to destroy: 3 task definitions, 3
-services, the ALB, its HTTP listener and its target group. No existing
-resource changes. That includes the security groups, the execution role and
-the migration task definition.
+include them. The predeployment plan with `enable_services = true` against
+the real state on 2026-09-26 showed 9 resources to add, 0 to change, 0 to
+destroy: 3 task definitions, 3 services, the ALB, its HTTP listener and its
+target group. It changed no existing resources, including the security
+groups, execution role and migration task definition. The subsequent
+[Phase 3 verification](phase3-cloud-verification.md) records the deployed
+services and ALB; the Phase 4 run linked above verified a later rollout.
 
 | Service | Command | Security group | Desired count variable | Behind the ALB |
 |---|---|---|---|---|
@@ -372,10 +389,10 @@ CloudWatch Logs only), the same `DB_*` environment and the same
 `DB_PASSWORD` secret reference, and no task role. Each writes to
 `/ecs/durable-runner-dev` under its own stream prefix (`api/`, `worker/`,
 `coordinator/`). Each Fargate task gets its own kernel, CPU, memory and
-network interface. Once deployed, the three roles are separate processes
-in separate tasks that share only PostgreSQL; Fargate doesn't expose which
-physical hosts run them. Locally they are separate processes on one
-machine.
+network interface. Deployment verification observed the three roles as
+separate processes in separate tasks that share only PostgreSQL; Fargate
+doesn't expose which physical hosts run them. Locally they are separate
+processes on one machine.
 
 No worker ID is set, so each worker task names itself
 `worker-<random UUID>`. A fixed `WORKER_ID` would give every task in the
@@ -530,8 +547,8 @@ notice on their own.
 
 One private repository, `durable-runner`, for the single image.
 
-- **Tags are immutable.** Deployments will tag images with the Git commit
-  SHA, so a tag always names the same bytes and a rollback to an old SHA
+- **Tags are immutable.** The deployment workflow tags images with the Git
+  commit SHA, so a tag always names the same bytes and a rollback to an old SHA
   gets the old image. The trade-off is that `latest` can't be re-pushed.
 - **Basic scan on push.** Findings are informational only and don't block
   a push or a deploy.
@@ -545,9 +562,10 @@ One private repository, `durable-runner`, for the single image.
 
 A `terraform plan` provisions nothing and costs nothing. Figures below are
 us-east-1 on-demand list prices checked in September 2026, before any
-free-tier credits.
+free-tier credits. These are historical estimates, not current bills or
+measurements of current spend; they have not been refreshed for November.
 
-**This foundation (deployed):**
+**Foundation and one-off migration costs (excluding long-running services):**
 
 | Item | Cost while it exists |
 |---|---|
@@ -558,10 +576,10 @@ free-tier credits.
 | ECS cluster, task definitions, execution role | no charge |
 | CloudWatch Logs (`/ecs/durable-runner-dev`, 7-day retention) | $0.50/GB ingested; the migration runs wrote a few KB |
 | Fargate (migration tasks) | per second while a task runs, 1-minute minimum; seconds per run |
-| Public IPv4 | $0.005/h per address, only while a task runs; nothing else here has one |
+| Public IPv4 (migration tasks) | $0.005/h per address while a task runs; service and ALB addresses are counted below |
 
-**Long-running services (while `enable_services = true`; defined, not
-applied).** Rough 24/7 monthly figures at the default desired counts (one
+**Long-running services (deployed in Phase 3; while `enable_services = true`).**
+Historical estimates for 24/7 operation at the default desired counts (one
 task per role):
 
 | Item | Assumption | ≈ per month |
